@@ -1,7 +1,7 @@
 {
   "name": "pixel-boosts-bot",
-  "version": "1.0.0",
-  "description": "Pixel Boosts storefront and server management bot",
+  "version": "3.0.0",
+  "description": "Pixel Boosts storefront bot with editable products and Discord-backed persistent configuration.",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
