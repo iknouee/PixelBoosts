@@ -12,6 +12,7 @@ const {
   Client,
   EmbedBuilder,
   GatewayIntentBits,
+  MessageFlags,
   PermissionFlagsBits,
   REST,
   Routes,
@@ -134,7 +135,7 @@ function isAdmin(interaction) {
 
 async function adminOnly(interaction) {
   if (isAdmin(interaction)) return true;
-  await interaction.reply({ content: 'You need Administrator permission to use this command.', ephemeral: true }).catch(() => {});
+  await interaction.reply({ content: 'You need Administrator permission to use this command.', flags: MessageFlags.Ephemeral }).catch(() => {});
   return false;
 }
 
@@ -570,8 +571,8 @@ client.on('interactionCreate', async interaction => {
   try {
     if (interaction.isButton()) {
       if (interaction.customId === 'create_order') {
-        if (!data.storeOpen) return interaction.reply({ content: 'The store is currently closed. Please check back soon.', ephemeral: true });
-        await interaction.deferReply({ ephemeral: true });
+        if (!data.storeOpen) return interaction.reply({ content: 'The store is currently closed. Please check back soon.', flags: MessageFlags.Ephemeral });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const existing = interaction.guild.channels.cache.find(c => c.topic?.includes(`Customer: ${interaction.user.id}`));
         if (existing) return interaction.editReply(`You already have an open order: ${existing}`);
 
@@ -623,7 +624,7 @@ client.on('interactionCreate', async interaction => {
 
       if (interaction.customId === 'close_order') {
         const canClose = isAdmin(interaction) || interaction.channel?.topic?.includes(`Customer: ${interaction.user.id}`);
-        if (!canClose) return interaction.reply({ content: 'Only the customer or an administrator can close this ticket.', ephemeral: true });
+        if (!canClose) return interaction.reply({ content: 'Only the customer or an administrator can close this ticket.', flags: MessageFlags.Ephemeral });
         await interaction.reply({ content: 'Closing this ticket in 5 seconds…' });
         await postLog('logs', brandedEmbed('🔒 Order Ticket Closed', `**Channel:** ${interaction.channel.name}\n**Closed by:** ${interaction.user}`));
         setTimeout(() => interaction.channel.delete('Pixel Boosts ticket closed').catch(() => {}), 5000);
@@ -638,15 +639,15 @@ client.on('interactionCreate', async interaction => {
       const type = interaction.options.getString('type');
       const channel = interaction.options.getChannel('channel');
       if (type === 'ticket-category' && channel.type !== ChannelType.GuildCategory) {
-        return interaction.reply({ content: 'For Ticket Category, choose an actual category.', ephemeral: true });
+        return interaction.reply({ content: 'For Ticket Category, choose an actual category.', flags: MessageFlags.Ephemeral });
       }
       if (type !== 'ticket-category' && !channel.isTextBased()) {
-        return interaction.reply({ content: 'Choose a text or announcement channel for this panel.', ephemeral: true });
+        return interaction.reply({ content: 'Choose a text or announcement channel for this panel.', flags: MessageFlags.Ephemeral });
       }
       data.channels[type] = channel.id;
       delete data.panels[type];
       saveData();
-      return interaction.reply({ content: `Set **${type}** to ${channel}.`, ephemeral: true });
+      return interaction.reply({ content: `Set **${type}** to ${channel}.`, flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'setrole') {
@@ -655,7 +656,7 @@ client.on('interactionCreate', async interaction => {
       const role = interaction.options.getRole('role');
       data.roles[type] = role.id;
       saveData();
-      return interaction.reply({ content: `Set **${type}** role to ${role}.`, ephemeral: true });
+      return interaction.reply({ content: `Set **${type}** role to ${role}.`, flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'setbank') {
@@ -664,10 +665,10 @@ client.on('interactionCreate', async interaction => {
       const sortCodeRaw = interaction.options.getString('sort_code').replace(/\D/g, '');
       const accountNumber = interaction.options.getString('account_number').replace(/\s/g, '');
       if (sortCodeRaw.length !== 6) {
-        return interaction.reply({ content: 'The sort code must contain exactly 6 digits.', ephemeral: true });
+        return interaction.reply({ content: 'The sort code must contain exactly 6 digits.', flags: MessageFlags.Ephemeral });
       }
       if (!/^\d{8}$/.test(accountNumber)) {
-        return interaction.reply({ content: 'The account number must contain exactly 8 digits.', ephemeral: true });
+        return interaction.reply({ content: 'The account number must contain exactly 8 digits.', flags: MessageFlags.Ephemeral });
       }
       data.bank = {
         accountName,
@@ -676,7 +677,7 @@ client.on('interactionCreate', async interaction => {
       };
       saveData();
       await refreshPanel('payment-methods');
-      return interaction.reply({ content: 'Bank-transfer details saved and the payment panel was refreshed.', ephemeral: true });
+      return interaction.reply({ content: 'Bank-transfer details saved and the payment panel was refreshed.', flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'config') {
@@ -685,12 +686,12 @@ client.on('interactionCreate', async interaction => {
       const roleText = ROLE_TYPES.map(([key, name]) => `**${name}:** ${data.roles[key] ? `<@&${data.roles[key]}>` : 'Not set'}`).join('\n');
       const bankStatus = data.bank?.accountName && data.bank?.sortCode && data.bank?.accountNumber ? 'Configured' : 'Not set';
       const embed = brandedEmbed('⚙️ Pixel Boosts Configuration', `${channelText}\n\n**Roles**\n${roleText}\n\n**Bank transfer:** ${bankStatus}\n**Store:** ${storeStatusText()}`);
-      return interaction.reply({ embeds: [embed], ephemeral: true });
+      return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'setup') {
       if (!await adminOnly(interaction)) return;
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const results = [];
       for (const panel of panelDefinitions()) results.push(await sendOrReplace(...panel));
       const ok = results.filter(r => r.ok).length;
@@ -699,25 +700,25 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.commandName === 'bank') {
-      return interaction.reply({ embeds: [bankEmbed()], ephemeral: true });
+      return interaction.reply({ embeds: [bankEmbed()], flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'shop' || interaction.commandName === 'buy') {
       return interaction.reply({
         embeds: [brandedEmbed('🚀 Pixel Boosts Shop', `${productLines()}\n\n**Stock:** ${data.stock} boosts\n**Store:** ${storeStatusText()}\n\n${data.storeOpen ? 'Open a private order before paying so staff can confirm availability.' : 'Ordering is temporarily unavailable.'}`)],
         components: [orderButtons()],
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
 
     if (interaction.commandName === 'stock') {
       const sub = interaction.options.getSubcommand();
-      if (sub === 'view') return interaction.reply({ embeds: [brandedEmbed('⚡ Current Stock', `Available: **${data.stock} boosts**\nStore: ${storeStatusText()}`)], ephemeral: true });
+      if (sub === 'view') return interaction.reply({ embeds: [brandedEmbed('⚡ Current Stock', `Available: **${data.stock} boosts**\nStore: ${storeStatusText()}`)], flags: MessageFlags.Ephemeral });
       if (!await adminOnly(interaction)) return;
       data.stock = interaction.options.getInteger('amount');
       saveData();
       await refreshCommercePanels();
-      return interaction.reply({ content: `Stock updated to **${data.stock} boosts**.`, ephemeral: true });
+      return interaction.reply({ content: `Stock updated to **${data.stock} boosts**.`, flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'restock') {
@@ -740,7 +741,7 @@ client.on('interactionCreate', async interaction => {
           });
         }
       }
-      return interaction.reply({ content: `Added **${amount} boosts**. New stock: **${data.stock}**.`, ephemeral: true });
+      return interaction.reply({ content: `Added **${amount} boosts**. New stock: **${data.stock}**.`, flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'package') {
@@ -749,23 +750,23 @@ client.on('interactionCreate', async interaction => {
         const ids = [...data.products].sort((a, b) => (a.months - b.months) || (a.boosts - b.boosts))
           .map(p => `\`${p.id}\` — **${p.boosts}x boosts / ${p.months} month${p.months === 1 ? '' : 's'}** — ${money(p.price)}`)
           .join('\n');
-        return interaction.reply({ embeds: [brandedEmbed('📦 Shop Packages', `${productLines()}\n\n**Package IDs**\n${ids}`)], ephemeral: true });
+        return interaction.reply({ embeds: [brandedEmbed('📦 Shop Packages', `${productLines()}\n\n**Package IDs**\n${ids}`)], flags: MessageFlags.Ephemeral });
       }
       if (!await adminOnly(interaction)) return;
       if (sub === 'reset') {
         data.products = cloneDefault().products;
         saveData();
         await refreshCommercePanels();
-        return interaction.reply({ content: 'Recommended packages restored.', ephemeral: true });
+        return interaction.reply({ content: 'Recommended packages restored.', flags: MessageFlags.Ephemeral });
       }
       const id = interaction.options.getString('id');
       if (sub === 'remove') {
         const before = data.products.length;
         data.products = data.products.filter(p => p.id !== id);
-        if (data.products.length === before) return interaction.reply({ content: 'Package ID not found.', ephemeral: true });
+        if (data.products.length === before) return interaction.reply({ content: 'Package ID not found.', flags: MessageFlags.Ephemeral });
         saveData();
         await refreshCommercePanels();
-        return interaction.reply({ content: `Removed package \`${id}\`.`, ephemeral: true });
+        return interaction.reply({ content: `Removed package \`${id}\`.`, flags: MessageFlags.Ephemeral });
       }
       if (sub === 'add') {
         const boosts = interaction.options.getInteger('boosts');
@@ -778,10 +779,10 @@ client.on('interactionCreate', async interaction => {
         data.products.push({ id: newId, name: `${boosts} Boosts`, boosts, months, price, description });
         saveData();
         await refreshCommercePanels();
-        return interaction.reply({ content: `Added package \`${newId}\` for **${money(price)}**.`, ephemeral: true });
+        return interaction.reply({ content: `Added package \`${newId}\` for **${money(price)}**.`, flags: MessageFlags.Ephemeral });
       }
       const product = findProduct(id);
-      if (!product) return interaction.reply({ content: 'Package ID not found. Run `/package list`.', ephemeral: true });
+      if (!product) return interaction.reply({ content: 'Package ID not found. Run `/package list`.', flags: MessageFlags.Ephemeral });
       product.boosts = interaction.options.getInteger('boosts') ?? product.boosts;
       product.months = interaction.options.getInteger('months') ?? product.months;
       product.price = interaction.options.getNumber('price') ?? product.price;
@@ -789,17 +790,17 @@ client.on('interactionCreate', async interaction => {
       product.name = `${product.boosts} Boosts`;
       saveData();
       await refreshCommercePanels();
-      return interaction.reply({ content: `Updated package \`${product.id}\`.`, ephemeral: true });
+      return interaction.reply({ content: `Updated package \`${product.id}\`.`, flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'discount') {
       const sub = interaction.options.getSubcommand();
-      if (sub === 'view') return interaction.reply({ content: data.discountPercent ? `The active discount is **${data.discountPercent}% off**.` : 'There is no active store-wide discount.', ephemeral: true });
+      if (sub === 'view') return interaction.reply({ content: data.discountPercent ? `The active discount is **${data.discountPercent}% off**.` : 'There is no active store-wide discount.', flags: MessageFlags.Ephemeral });
       if (!await adminOnly(interaction)) return;
       data.discountPercent = sub === 'clear' ? 0 : interaction.options.getInteger('percent');
       saveData();
       await refreshCommercePanels();
-      return interaction.reply({ content: data.discountPercent ? `Store discount set to **${data.discountPercent}% off**.` : 'Store discount cleared.', ephemeral: true });
+      return interaction.reply({ content: data.discountPercent ? `Store discount set to **${data.discountPercent}% off**.` : 'Store discount cleared.', flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'coupon') {
@@ -807,9 +808,9 @@ client.on('interactionCreate', async interaction => {
       const code = interaction.options.getString('code')?.trim().toUpperCase();
       if (sub === 'redeem') {
         const coupon = data.coupons[code];
-        if (!coupon || coupon.active === false) return interaction.reply({ content: 'That coupon code is invalid or inactive.', ephemeral: true });
-        if (coupon.maxUses && coupon.uses >= coupon.maxUses) return interaction.reply({ content: 'That coupon has reached its usage limit.', ephemeral: true });
-        return interaction.reply({ content: `Coupon **${code}** is valid for **${coupon.percent}% off**. Send this code in your order ticket so staff can apply it.`, ephemeral: true });
+        if (!coupon || coupon.active === false) return interaction.reply({ content: 'That coupon code is invalid or inactive.', flags: MessageFlags.Ephemeral });
+        if (coupon.maxUses && coupon.uses >= coupon.maxUses) return interaction.reply({ content: 'That coupon has reached its usage limit.', flags: MessageFlags.Ephemeral });
+        return interaction.reply({ content: `Coupon **${code}** is valid for **${coupon.percent}% off**. Send this code in your order ticket so staff can apply it.`, flags: MessageFlags.Ephemeral });
       }
       if (!await adminOnly(interaction)) return;
       if (sub === 'create') {
@@ -817,27 +818,27 @@ client.on('interactionCreate', async interaction => {
         const maxUses = interaction.options.getInteger('uses');
         data.coupons[code] = { percent, maxUses: maxUses || null, uses: 0, active: true, createdAt: new Date().toISOString() };
         saveData();
-        return interaction.reply({ content: `Created coupon **${code}** for **${percent}% off**${maxUses ? ` with ${maxUses} maximum uses` : ''}.`, ephemeral: true });
+        return interaction.reply({ content: `Created coupon **${code}** for **${percent}% off**${maxUses ? ` with ${maxUses} maximum uses` : ''}.`, flags: MessageFlags.Ephemeral });
       }
       if (sub === 'delete') {
-        if (!data.coupons[code]) return interaction.reply({ content: 'Coupon not found.', ephemeral: true });
+        if (!data.coupons[code]) return interaction.reply({ content: 'Coupon not found.', flags: MessageFlags.Ephemeral });
         delete data.coupons[code];
         saveData();
-        return interaction.reply({ content: `Deleted coupon **${code}**.`, ephemeral: true });
+        return interaction.reply({ content: `Deleted coupon **${code}**.`, flags: MessageFlags.Ephemeral });
       }
       const entries = Object.entries(data.coupons);
       const text = entries.length ? entries.map(([name, c]) => `**${name}** — ${c.percent}% off • ${c.uses}/${c.maxUses || '∞'} uses`).join('\n') : 'No coupons have been created.';
-      return interaction.reply({ embeds: [brandedEmbed('🎟️ Coupon Codes', text)], ephemeral: true });
+      return interaction.reply({ embeds: [brandedEmbed('🎟️ Coupon Codes', text)], flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'store') {
       const sub = interaction.options.getSubcommand();
-      if (sub === 'status') return interaction.reply({ embeds: [statusEmbed()], ephemeral: true });
+      if (sub === 'status') return interaction.reply({ embeds: [statusEmbed()], flags: MessageFlags.Ephemeral });
       if (!await adminOnly(interaction)) return;
       data.storeOpen = sub === 'open';
       saveData();
       await refreshCommercePanels();
-      return interaction.reply({ content: `The store is now **${data.storeOpen ? 'OPEN' : 'CLOSED'}**.`, ephemeral: true });
+      return interaction.reply({ content: `The store is now **${data.storeOpen ? 'OPEN' : 'CLOSED'}**.`, flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'offer') {
@@ -845,7 +846,7 @@ client.on('interactionCreate', async interaction => {
       data.offer = interaction.options.getString('text');
       saveData();
       await refreshPanel('special-offers');
-      return interaction.reply({ content: 'Special offer updated.', ephemeral: true });
+      return interaction.reply({ content: 'Special offer updated.', flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'dashboard') {
@@ -859,7 +860,7 @@ client.on('interactionCreate', async interaction => {
         `**Reviews:** ${data.stats.reviews}`,
         `**Best Package:** ${bestPackage()}`,
         `**Current Discount:** ${data.discountPercent ? `${data.discountPercent}%` : 'None'}`,
-      ].join('\n'))], ephemeral: true });
+      ].join('\n'))], flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'stats') {
@@ -876,7 +877,7 @@ client.on('interactionCreate', async interaction => {
         `**Best-Selling Package:** ${bestPackage()}`,
         `**Stock Remaining:** ${data.stock} boosts`,
         `**Last Restock:** ${relativeTime(data.stats.lastRestockAt)}`,
-      ].join('\n'))], ephemeral: true });
+      ].join('\n'))], flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'announce' || interaction.commandName === 'embed') {
@@ -886,14 +887,14 @@ client.on('interactionCreate', async interaction => {
       const description = interaction.options.getString(interaction.commandName === 'announce' ? 'message' : 'description');
       const ping = interaction.commandName === 'announce' && interaction.options.getBoolean('ping');
       await channel.send({ content: ping ? '@everyone' : undefined, embeds: [brandedEmbed(title, description)], allowedMentions: { parse: ping ? ['everyone'] : [] } });
-      return interaction.reply({ content: `Sent to ${channel}.`, ephemeral: true });
+      return interaction.reply({ content: `Sent to ${channel}.`, flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'complete-order') {
       if (!await adminOnly(interaction)) return;
       const targetId = data.channels['completed-orders'];
       const target = targetId ? await client.channels.fetch(targetId).catch(() => null) : null;
-      if (!target?.isTextBased()) return interaction.reply({ content: 'Set the completed-orders channel first with `/setchannel`.', ephemeral: true });
+      if (!target?.isTextBased()) return interaction.reply({ content: 'Set the completed-orders channel first with `/setchannel`.', flags: MessageFlags.Ephemeral });
       const customer = interaction.options.getUser('customer');
       const boosts = interaction.options.getInteger('boosts');
       const amount = interaction.options.getString('amount');
@@ -914,28 +915,28 @@ client.on('interactionCreate', async interaction => {
       saveData();
       await refreshCommercePanels();
       await postLog('sales-log', brandedEmbed('💸 Sale Recorded', `**Order:** #${orderId}\n**Customer:** ${customer}\n**Revenue:** ${amount}\n**Boosts:** ${boosts}`));
-      return interaction.reply({ content: 'Completed order logged, analytics updated and customer role processed.', ephemeral: true });
+      return interaction.reply({ content: 'Completed order logged, analytics updated and customer role processed.', flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'review') {
       const targetId = data.channels.reviews;
       const target = targetId ? await client.channels.fetch(targetId).catch(() => null) : null;
-      if (!target?.isTextBased()) return interaction.reply({ content: 'The reviews channel has not been configured yet.', ephemeral: true });
+      if (!target?.isTextBased()) return interaction.reply({ content: 'The reviews channel has not been configured yet.', flags: MessageFlags.Ephemeral });
       const member = interaction.member;
       if (data.roles.customer && !member.roles.cache.has(data.roles.customer) && !isAdmin(interaction)) {
-        return interaction.reply({ content: 'Only customers with the Customer role can leave a review.', ephemeral: true });
+        return interaction.reply({ content: 'Only customers with the Customer role can leave a review.', flags: MessageFlags.Ephemeral });
       }
       const rating = interaction.options.getInteger('rating');
       const comment = interaction.options.getString('comment');
       await target.send({ embeds: [brandedEmbed(`${'⭐'.repeat(rating)} Customer Review`, `**Customer:** ${interaction.user}\n**Rating:** ${rating}/5\n\n${comment}`)] });
       data.stats.reviews += 1;
       saveData();
-      return interaction.reply({ content: 'Thank you — your review has been posted.', ephemeral: true });
+      return interaction.reply({ content: 'Thank you — your review has been posted.', flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'close-ticket') {
       const canClose = isAdmin(interaction) || interaction.channel?.topic?.includes(`Customer: ${interaction.user.id}`);
-      if (!canClose || !interaction.channel?.topic?.startsWith('Pixel Boosts order')) return interaction.reply({ content: 'Use this inside your order ticket.', ephemeral: true });
+      if (!canClose || !interaction.channel?.topic?.startsWith('Pixel Boosts order')) return interaction.reply({ content: 'Use this inside your order ticket.', flags: MessageFlags.Ephemeral });
       await interaction.reply('Closing this ticket in 5 seconds…');
       await postLog('logs', brandedEmbed('🔒 Order Ticket Closed', `**Channel:** ${interaction.channel.name}\n**Closed by:** ${interaction.user}`));
       setTimeout(() => interaction.channel.delete('Pixel Boosts ticket closed').catch(() => {}), 5000);
@@ -960,11 +961,27 @@ client.on('interactionCreate', async interaction => {
         '`/discount` • `/coupon` • `/offer`',
         '`/announce` • `/embed` • `/complete-order`',
         '`/dashboard` • `/stats`',
-      ].join('\n'))], ephemeral: true });
+      ].join('\n'))], flags: MessageFlags.Ephemeral });
     }
   } catch (error) {
+    const code = error?.code ?? error?.rawError?.code;
+
+    // Discord only keeps an interaction token alive briefly before the first
+    // reply/defer. This can happen during a temporary network delay or when
+    // two bot instances are running during a Render redeploy.
+    if (code === 10062) {
+      console.warn(`Expired Discord interaction ignored: ${interaction.commandName || interaction.customId || interaction.id}`);
+      return;
+    }
+
+    // Another running instance may already have acknowledged the same action.
+    if (code === 40060) {
+      console.warn(`Already-acknowledged Discord interaction ignored: ${interaction.commandName || interaction.customId || interaction.id}`);
+      return;
+    }
+
     console.error('Interaction error:', error);
-    const payload = { content: 'Something went wrong while processing that action.', ephemeral: true };
+    const payload = { content: 'Something went wrong while processing that action.', flags: MessageFlags.Ephemeral };
     if (interaction.deferred || interaction.replied) await interaction.followUp(payload).catch(() => {});
     else await interaction.reply(payload).catch(() => {});
   }
