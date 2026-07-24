@@ -17,8 +17,7 @@ const {
   SlashCommandBuilder,
 } = require('discord.js');
 
-const requiredEnv = ['DISCORD_TOKEN', 'CLIENT_ID', 'GUILD_ID'];
-for (const key of requiredEnv) {
+for (const key of ['DISCORD_TOKEN', 'CLIENT_ID', 'GUILD_ID']) {
   if (!process.env[key]) {
     console.error(`Missing required environment variable: ${key}`);
     process.exit(1);
@@ -27,8 +26,8 @@ for (const key of requiredEnv) {
 
 const BRAND = {
   name: 'Pixel Boosts',
-  color: Number.parseInt((process.env.EMBED_COLOR || 'FF2D9B').replace('#', ''), 16),
-  banner: process.env.BANNER_URL || 'https://cdn.discordapp.com/attachments/1530275322828951585/1530277037024084178/bannerpixel.png',
+  color: 0xff2d9b,
+  banner: 'https://cdn.discordapp.com/attachments/1530275322828951585/1530277037024084178/bannerpixel.png?ex=6a64fd0c&is=6a63ab8c&hm=d9aaef317d28584923626aeeb0e0cd8a0e0b3b7f4b254a64fb0aeead18a981ef',
 };
 
 const DATA_FILE = path.join(__dirname, 'data.json');
@@ -43,12 +42,22 @@ const DEFAULT_DATA = {
   },
   offer: 'No active special offer right now. Check back soon!',
   orderCounter: 0,
+  stripeUrl: '',
+  channels: {},
+  roles: {},
 };
 
 function loadData() {
   try {
     if (!fs.existsSync(DATA_FILE)) return structuredClone(DEFAULT_DATA);
-    return { ...structuredClone(DEFAULT_DATA), ...JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) };
+    const saved = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    return {
+      ...structuredClone(DEFAULT_DATA),
+      ...saved,
+      prices: { ...DEFAULT_DATA.prices, ...(saved.prices || {}) },
+      channels: { ...(saved.channels || {}) },
+      roles: { ...(saved.roles || {}) },
+    };
   } catch (error) {
     console.error('Could not load data.json:', error);
     return structuredClone(DEFAULT_DATA);
@@ -71,36 +80,19 @@ function brandedEmbed(title, description) {
     .setTitle(title)
     .setDescription(description)
     .setImage(BRAND.banner)
-    .setFooter({ text: 'Pixel Boosts • Fast, clear and trusted service' })
+    .setFooter({ text: 'Pixel Boosts • Fast, affordable and trusted' })
     .setTimestamp();
 }
 
 function isAdmin(interaction) {
-  return interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) || interaction.guild?.ownerId === interaction.user.id;
+  return interaction.guild?.ownerId === interaction.user.id ||
+    interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
 }
 
-function adminOnly(interaction) {
+async function adminOnly(interaction) {
   if (isAdmin(interaction)) return true;
-  interaction.reply({ content: 'You need Administrator permission to use this command.', ephemeral: true }).catch(() => {});
+  await interaction.reply({ content: 'You need Administrator permission to use this command.', ephemeral: true }).catch(() => {});
   return false;
-}
-
-function channelMention(id) {
-  return id ? `<#${id}>` : 'the relevant channel';
-}
-
-async function sendOrReplace(channelId, key, payload) {
-  if (!channelId) return { ok: false, reason: `Missing ${key} channel ID` };
-  const channel = await client.channels.fetch(channelId).catch(() => null);
-  if (!channel?.isTextBased()) return { ok: false, reason: `${key} channel was not found or is not text-based` };
-
-  const recent = await channel.messages.fetch({ limit: 50 }).catch(() => null);
-  const old = recent?.find(message => message.author.id === client.user.id && message.embeds?.[0]?.footer?.text?.includes(`Panel: ${key}`));
-  const panelEmbed = EmbedBuilder.from(payload.embeds[0]).setFooter({ text: `Pixel Boosts • Panel: ${key}` });
-  const finalPayload = { ...payload, embeds: [panelEmbed] };
-  if (old) await old.edit(finalPayload);
-  else await channel.send(finalPayload);
-  return { ok: true };
 }
 
 function priceLines() {
@@ -110,9 +102,40 @@ function priceLines() {
     .join('\n');
 }
 
+const CHANNEL_TYPES = [
+  ['rules', 'Rules'], ['announcements', 'Announcements'], ['faq', 'FAQ'],
+  ['how-it-works', 'How It Works'], ['partners', 'Partners'],
+  ['boost-packages', 'Boost Packages'], ['pricing', 'Pricing'], ['stock', 'Instant Stock'],
+  ['special-offers', 'Special Offers'], ['create-order', 'Create Order'],
+  ['order-status', 'Order Status'], ['payment-methods', 'Payment Methods'],
+  ['reviews', 'Reviews'], ['proof', 'Proof'], ['video-vouches', 'Video Vouches'],
+  ['completed-orders', 'Completed Orders'], ['logs', 'Logs'], ['sales-log', 'Sales Log'],
+  ['ticket-category', 'Ticket Category'],
+];
+
+const ROLE_TYPES = [
+  ['member', 'Member'], ['customer', 'Customer'], ['support', 'Support'], ['staff', 'Staff'],
+];
+
+const channelChoices = CHANNEL_TYPES.map(([value, name]) => ({ name, value }));
+const roleChoices = ROLE_TYPES.map(([value, name]) => ({ name, value }));
+
 const commands = [
-  new SlashCommandBuilder().setName('setup').setDescription('Send or refresh all Pixel Boosts server panels').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('setup').setDescription('Send or refresh every configured Pixel Boosts panel').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('setchannel').setDescription('Choose where a server panel or ticket category is used')
+    .addStringOption(o => o.setName('type').setDescription('What this channel is for').setRequired(true).addChoices(...channelChoices))
+    .addChannelOption(o => o.setName('channel').setDescription('Channel or category').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('setrole').setDescription('Choose a role used by the bot')
+    .addStringOption(o => o.setName('type').setDescription('What this role is for').setRequired(true).addChoices(...roleChoices))
+    .addRoleOption(o => o.setName('role').setDescription('Role to use').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('setstripe').setDescription('Set the Stripe payment-link URL')
+    .addStringOption(o => o.setName('url').setDescription('Example: https://buy.stripe.com/...').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('config').setDescription('View the current bot channel, role and Stripe setup').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('shop').setDescription('View packages, stock and ordering information'),
+  new SlashCommandBuilder().setName('buy').setDescription('Open the order panel and Stripe checkout'),
   new SlashCommandBuilder().setName('stock').setDescription('View or update boost stock')
     .addSubcommand(s => s.setName('view').setDescription('View current stock'))
     .addSubcommand(s => s.setName('set').setDescription('Set current stock').addIntegerOption(o => o.setName('amount').setDescription('Available boosts').setRequired(true).setMinValue(0))),
@@ -121,7 +144,7 @@ const commands = [
     .addSubcommand(s => s.setName('set').setDescription('Set a package price')
       .addIntegerOption(o => o.setName('boosts').setDescription('Number of boosts').setRequired(true).setMinValue(1).setMaxValue(100))
       .addStringOption(o => o.setName('price').setDescription('Example: £8.99').setRequired(true).setMaxLength(30))),
-  new SlashCommandBuilder().setName('offer').setDescription('Update the special offer panel')
+  new SlashCommandBuilder().setName('offer').setDescription('Update the special-offer panel')
     .addStringOption(o => o.setName('text').setDescription('Offer text').setRequired(true).setMaxLength(1000))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('announce').setDescription('Send a branded announcement')
@@ -143,7 +166,7 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('close-ticket').setDescription('Close the current order ticket'),
   new SlashCommandBuilder().setName('help').setDescription('Show Pixel Boosts bot commands'),
-].map(command => command.toJSON());
+].map(c => c.toJSON());
 
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
@@ -151,66 +174,77 @@ async function registerCommands() {
   console.log(`Registered ${commands.length} guild commands.`);
 }
 
-function panels() {
-  const orderButton = new ActionRowBuilder().addComponents(
+function orderButtons() {
+  const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('create_order').setLabel('Create an Order').setEmoji('🛒').setStyle(ButtonStyle.Primary),
   );
+  if (data.stripeUrl) {
+    row.addComponents(new ButtonBuilder().setLabel('Pay with Stripe').setEmoji('💳').setStyle(ButtonStyle.Link).setURL(data.stripeUrl));
+  }
+  return row;
+}
 
+function panelDefinitions() {
   return [
-    ['RULES_CHANNEL_ID', 'rules', { embeds: [brandedEmbed('📜 Pixel Boosts Rules', [
+    ['rules', brandedEmbed('📜 Pixel Boosts Rules', [
       '1. Treat customers and staff with respect.',
-      '2. Do not spam, advertise, scam, or impersonate staff.',
-      '3. Payments and order details must stay inside your private ticket.',
-      '4. Never send passwords, Discord tokens, QR logins, cookies, or account access.',
-      '5. Boosts are only supplied from legitimate Discord purchases.',
-      '6. Prices, stock and delivery estimates may change before payment.',
-      '7. Chargebacks or fraudulent claims may result in removal from the server.',
+      '2. Do not spam, advertise, scam or impersonate staff.',
+      '3. Keep order and payment details inside your private ticket.',
+      '4. Never send passwords, Discord tokens, QR codes, cookies or account access.',
+      '5. Prices and stock may change until staff confirms your order.',
+      '6. Fraudulent disputes or chargebacks may result in removal from the server.',
       '',
-      'By ordering, you confirm that you understand the package duration and terms shown in your ticket.',
-    ].join('\n'))] }],
-    ['ANNOUNCEMENTS_CHANNEL_ID', 'announcements', { embeds: [brandedEmbed('📢 Announcements', 'Official Pixel Boosts updates, restocks, package changes and important notices will be posted here. Enable notifications so you do not miss a restock.')] }],
-    ['FAQ_CHANNEL_ID', 'faq', { embeds: [brandedEmbed('❓ Frequently Asked Questions', [
-      '**How do I order?**\nPress the order button in the order channel and wait for staff.',
-      '**How long do boosts last?**\nEach listing states its duration. The default packages are monthly.',
-      '**Is account access required?**\nNo. We will never ask for your password, token, QR login or cookies.',
-      '**When will delivery begin?**\nAfter payment is confirmed and stock is available.',
-      '**Can prices change?**\nYes, until staff confirms your quote inside the ticket.',
-      '**Can I leave a review?**\nYes. After completion, post an honest review in the reviews channel.',
-    ].join('\n\n'))] }],
-    ['HOW_IT_WORKS_CHANNEL_ID', 'how-it-works', { embeds: [brandedEmbed('📖 How It Works', [
-      '**1. Choose a package**\nCheck prices and current stock.',
-      '**2. Open an order**\nUse the button in the create-order channel.',
-      '**3. Receive a quote**\nStaff confirms stock, duration, price and estimated delivery.',
-      '**4. Pay securely**\nUse the payment details supplied in your private ticket.',
-      '**5. Delivery and confirmation**\nStaff completes the order and records it in completed orders.',
-      '',
-      'We never need access to your Discord account.',
-    ].join('\n\n'))] }],
-    ['PARTNERS_CHANNEL_ID', 'partners', { embeds: [brandedEmbed('📜 Partnerships', 'Interested in partnering with Pixel Boosts? Open an order/support ticket and include your server size, invite link, audience, and what you are offering. Partnerships are reviewed individually; mass-DM advertising is not allowed.')] }],
-    ['BOOST_PACKAGES_CHANNEL_ID', 'boost-packages', { embeds: [brandedEmbed('💎 Boost Packages', `${priceLines()}\n\nAll packages are subject to live stock and confirmation in your private ticket. Custom quantities can be quoted by staff.`)], components: [orderButton] }],
-    ['PRICING_CHANNEL_ID', 'pricing', { embeds: [brandedEmbed('💰 Current Pricing', `${priceLines()}\n\n**Important:** Prices shown are starting prices and may change with Discord costs, duration, quantity or availability. Your ticket quote is final before payment.`)], components: [orderButton] }],
-    ['STOCK_CHANNEL_ID', 'stock', { embeds: [brandedEmbed('⚡ Instant Stock', data.stock > 0 ? `**${data.stock} boosts** are currently marked available.\n\nOpen an order ticket to reserve stock. Stock is not held until staff confirms your order.` : '**Currently out of stock.**\n\nWatch this channel for the next restock.')] }],
-    ['SPECIAL_OFFERS_CHANNEL_ID', 'special-offers', { embeds: [brandedEmbed('🎁 Special Offers', data.offer)] }],
-    ['CREATE_ORDER_CHANNEL_ID', 'create-order', { embeds: [brandedEmbed('🎫 Create an Order', 'Press the button below to open a private order ticket. Tell us your required number of boosts, duration and server invite. Do not post payment information publicly.')], components: [orderButton] }],
-    ['ORDER_STATUS_CHANNEL_ID', 'order-status', { embeds: [brandedEmbed('📦 Order Status', 'Order updates are provided inside each private ticket. Public completed-order confirmations may appear in the completed-orders channel after delivery.')] }],
-    ['PAYMENT_METHODS_CHANNEL_ID', 'payment-methods', { embeds: [brandedEmbed('💳 Payment Methods', [
-      '**Bank Transfer**\nDetails are provided privately by staff after your order is confirmed.',
-      '**PayPal Goods & Services**\nUse the PayPal details supplied in your private ticket. Include only the reference staff gives you.',
-      '',
-      'Never send money to an account posted by another member. Verify the staff role before paying.',
-    ].join('\n\n'))] }],
-    ['REVIEWS_CHANNEL_ID', 'reviews', { embeds: [brandedEmbed('⭐ Customer Reviews', 'Completed an order? Leave an honest review including the package, delivery experience and staff member who helped you. Do not post private payment details.')] }],
-    ['PROOF_CHANNEL_ID', 'proof', { embeds: [brandedEmbed('📸 Delivery Proof', 'Staff may post privacy-safe delivery confirmations here. Customer names, payment details and sensitive information must be hidden unless the customer has clearly agreed to share them.')] }],
-    ['VIDEO_VOUCHES_CHANNEL_ID', 'video-vouches', { embeds: [brandedEmbed('🎥 Video Vouches', 'Customers may share genuine video vouches here after a completed order. Fake, purchased or misleading vouches are not accepted.')] }],
-    ['COMPLETED_ORDERS_CHANNEL_ID', 'completed-orders', { embeds: [brandedEmbed('🏆 Completed Orders', 'Verified completed orders will be logged here by staff using `/complete-order`.')] }],
+      'By ordering, you agree to the package duration and final quote confirmed in your ticket.',
+    ].join('\n'))],
+    ['announcements', brandedEmbed('📢 Announcements', 'Official Pixel Boosts updates, restocks, package changes and important notices are posted here.')],
+    ['faq', brandedEmbed('❓ Frequently Asked Questions', [
+      '**How do I order?**\nOpen a private ticket through the create-order panel.',
+      '**How long do boosts last?**\nThe standard packages are monthly unless your ticket says otherwise.',
+      '**Do you need my Discord login?**\nNo. We never ask for passwords, tokens, QR codes or cookies.',
+      '**When does delivery start?**\nAfter payment is confirmed and stock is available.',
+      '**Can prices change?**\nYes, until your final quote is confirmed in the ticket.',
+    ].join('\n\n'))],
+    ['how-it-works', brandedEmbed('📖 How It Works', [
+      '**1. Pick a package**\nCheck the prices and live stock.',
+      '**2. Open an order ticket**\nTell staff the amount and duration you need.',
+      '**3. Receive confirmation**\nStaff confirms stock and your final total.',
+      '**4. Pay securely with Stripe**\nUse the official Stripe link only.',
+      '**5. Delivery**\nYour order is processed and logged once completed.',
+    ].join('\n\n'))],
+    ['partners', brandedEmbed('📜 Partnerships', 'To discuss a partnership, open a ticket and include your server size, invite link, audience and what you are offering.')],
+    ['boost-packages', brandedEmbed('💎 Boost Packages', `${priceLines()}\n\nAll packages are subject to live stock and staff confirmation. Custom quantities can be quoted in a ticket.`), orderButtons()],
+    ['pricing', brandedEmbed('💰 Current Pricing', `${priceLines()}\n\nYour confirmed ticket quote is final before payment.`), orderButtons()],
+    ['stock', brandedEmbed('⚡ Instant Stock', data.stock > 0 ? `**${data.stock} boosts** are currently available.\n\nOpen a ticket to reserve stock.` : '**Currently out of stock.**\n\nWatch this channel for the next restock.')],
+    ['special-offers', brandedEmbed('🎁 Special Offers', data.offer)],
+    ['create-order', brandedEmbed('🎫 Create an Order', 'Press **Create an Order** below to open a private ticket. Staff will confirm your package, stock and final price before you pay.'), orderButtons()],
+    ['order-status', brandedEmbed('📦 Order Status', 'Order updates are posted inside each private ticket. Completed orders are logged after delivery.')],
+    ['payment-methods', brandedEmbed('💳 Secure Payments', data.stripeUrl ? 'Payments are accepted securely through **Stripe Checkout**.\n\nOnly use the official button below or the link supplied by verified staff in your private ticket.' : 'Stripe is the only supported payment method. The owner has not configured the Stripe payment link yet.'), data.stripeUrl ? orderButtons() : null],
+    ['reviews', brandedEmbed('⭐ Customer Reviews', 'Completed an order? Leave an honest review about your package, delivery and support experience. Never post private payment details.')],
+    ['proof', brandedEmbed('📸 Delivery Proof', 'Privacy-safe delivery confirmations may be posted here. Sensitive details must always be hidden.')],
+    ['video-vouches', brandedEmbed('🎥 Video Vouches', 'Customers can share genuine video vouches after a completed order.')],
+    ['completed-orders', brandedEmbed('🏆 Completed Orders', 'Verified completed orders are logged here by staff using `/complete-order`.')],
   ];
 }
 
+async function sendOrReplace(key, embed, components = null) {
+  const channelId = data.channels[key];
+  if (!channelId) return { ok: false, reason: `${key} has not been configured` };
+  const channel = await client.channels.fetch(channelId).catch(() => null);
+  if (!channel?.isTextBased()) return { ok: false, reason: `${key} channel is invalid` };
+
+  const recent = await channel.messages.fetch({ limit: 50 }).catch(() => null);
+  const marker = `Pixel Boosts • Panel: ${key}`;
+  const old = recent?.find(m => m.author.id === client.user.id && m.embeds?.[0]?.footer?.text === marker);
+  const finalEmbed = EmbedBuilder.from(embed).setFooter({ text: marker });
+  const payload = { embeds: [finalEmbed], components: components ? [components] : [] };
+  if (old) await old.edit(payload);
+  else await channel.send(payload);
+  return { ok: true };
+}
+
 async function refreshPanel(key) {
-  const panel = panels().find(([, panelKey]) => panelKey === key);
-  if (!panel) return;
-  const [envKey, panelKey, payload] = panel;
-  await sendOrReplace(process.env[envKey], panelKey, payload);
+  const panel = panelDefinitions().find(([panelKey]) => panelKey === key);
+  if (panel) await sendOrReplace(...panel);
 }
 
 client.once('ready', async () => {
@@ -220,8 +254,9 @@ client.once('ready', async () => {
 });
 
 client.on('guildMemberAdd', async member => {
-  if (!process.env.MEMBER_ROLE_ID) return;
-  const role = member.guild.roles.cache.get(process.env.MEMBER_ROLE_ID);
+  const roleId = data.roles.member;
+  if (!roleId) return;
+  const role = member.guild.roles.cache.get(roleId);
   if (role) await member.roles.add(role).catch(() => {});
 });
 
@@ -230,42 +265,44 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isButton()) {
       if (interaction.customId === 'create_order') {
         await interaction.deferReply({ ephemeral: true });
-        const existing = interaction.guild.channels.cache.find(c => c.name === `order-${interaction.user.id}`);
+        const existing = interaction.guild.channels.cache.find(c => c.topic?.includes(`Customer: ${interaction.user.id}`));
         if (existing) return interaction.editReply(`You already have an open order: ${existing}`);
 
         data.orderCounter += 1;
         saveData();
         const orderNumber = String(data.orderCounter).padStart(4, '0');
-        const permissionOverwrites = [
+        const overwrites = [
           { id: interaction.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
           { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
           { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ReadMessageHistory] },
         ];
-        for (const roleId of [process.env.SUPPORT_ROLE_ID, process.env.STAFF_ROLE_ID].filter(Boolean)) {
-          permissionOverwrites.push({ id: roleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
+        for (const roleId of [data.roles.support, data.roles.staff].filter(Boolean)) {
+          overwrites.push({ id: roleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
         }
 
+        const parent = data.channels['ticket-category'];
         const channel = await interaction.guild.channels.create({
-          name: `order-${interaction.user.id}`,
+          name: `order-${orderNumber}`,
           type: ChannelType.GuildText,
-          parent: process.env.TICKET_CATEGORY_ID || undefined,
+          parent: parent || undefined,
           topic: `Pixel Boosts order #${orderNumber} | Customer: ${interaction.user.id}`,
-          permissionOverwrites,
+          permissionOverwrites: overwrites,
         });
 
         const closeRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId('close_order').setLabel('Close Ticket').setEmoji('🔒').setStyle(ButtonStyle.Danger),
         );
+        if (data.stripeUrl) closeRow.addComponents(new ButtonBuilder().setLabel('Pay with Stripe').setEmoji('💳').setStyle(ButtonStyle.Link).setURL(data.stripeUrl));
+
         await channel.send({
-          content: `${interaction.user}${process.env.SUPPORT_ROLE_ID ? ` <@&${process.env.SUPPORT_ROLE_ID}>` : ''}`,
+          content: `${interaction.user}${data.roles.support ? ` <@&${data.roles.support}>` : ''}`,
           embeds: [brandedEmbed(`🛒 Order #${orderNumber}`, [
-            'Thanks for choosing Pixel Boosts. Please send:',
+            'Please send:',
             '• Number of boosts required',
             '• Duration required',
             '• Your server invite',
-            '• Preferred payment method',
             '',
-            'Wait for staff to confirm stock and the final quote before paying.',
+            'Wait for staff to confirm your package and final total before paying.',
             '**Never share your Discord password, token, QR code or cookies.**',
           ].join('\n'))],
           components: [closeRow],
@@ -284,37 +321,85 @@ client.on('interactionCreate', async interaction => {
 
     if (!interaction.isChatInputCommand()) return;
 
-    if (interaction.commandName === 'setup') {
-      if (!adminOnly(interaction)) return;
-      await interaction.deferReply({ ephemeral: true });
-      const results = [];
-      for (const [envKey, key, payload] of panels()) {
-        results.push(await sendOrReplace(process.env[envKey], key, payload));
+    if (interaction.commandName === 'setchannel') {
+      if (!await adminOnly(interaction)) return;
+      const type = interaction.options.getString('type');
+      const channel = interaction.options.getChannel('channel');
+      if (type === 'ticket-category' && channel.type !== ChannelType.GuildCategory) {
+        return interaction.reply({ content: 'For Ticket Category, choose an actual category.', ephemeral: true });
       }
-      const successful = results.filter(r => r.ok).length;
-      const failed = results.filter(r => !r.ok).map(r => `• ${r.reason}`);
-      return interaction.editReply(`Refreshed **${successful}** panels.${failed.length ? `\n\nNot sent:\n${failed.join('\n')}` : ''}`);
+      if (type !== 'ticket-category' && !channel.isTextBased()) {
+        return interaction.reply({ content: 'Choose a text or announcement channel for this panel.', ephemeral: true });
+      }
+      data.channels[type] = channel.id;
+      saveData();
+      return interaction.reply({ content: `Set **${type}** to ${channel}.`, ephemeral: true });
     }
 
-    if (interaction.commandName === 'shop') {
-      const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('create_order').setLabel('Create an Order').setEmoji('🛒').setStyle(ButtonStyle.Primary));
-      return interaction.reply({ embeds: [brandedEmbed('🚀 Pixel Boosts Shop', `${priceLines()}\n\n**Stock:** ${data.stock} boosts\n\nPress below to open a private order.`)], components: [row], ephemeral: true });
+    if (interaction.commandName === 'setrole') {
+      if (!await adminOnly(interaction)) return;
+      const type = interaction.options.getString('type');
+      const role = interaction.options.getRole('role');
+      data.roles[type] = role.id;
+      saveData();
+      return interaction.reply({ content: `Set **${type}** role to ${role}.`, ephemeral: true });
+    }
+
+    if (interaction.commandName === 'setstripe') {
+      if (!await adminOnly(interaction)) return;
+      const url = interaction.options.getString('url').trim();
+      if (!/^https:\/\/(buy\.stripe\.com|checkout\.stripe\.com)\//i.test(url)) {
+        return interaction.reply({ content: 'Please provide a valid Stripe Checkout or Stripe Payment Link URL.', ephemeral: true });
+      }
+      data.stripeUrl = url;
+      saveData();
+      await refreshPanel('payment-methods');
+      await refreshPanel('create-order');
+      await refreshPanel('pricing');
+      await refreshPanel('boost-packages');
+      return interaction.reply({ content: 'Stripe payment link saved and relevant panels refreshed.', ephemeral: true });
+    }
+
+    if (interaction.commandName === 'config') {
+      if (!await adminOnly(interaction)) return;
+      const channelText = CHANNEL_TYPES.map(([key, name]) => `**${name}:** ${data.channels[key] ? `<#${data.channels[key]}>` : 'Not set'}`).join('\n');
+      const roleText = ROLE_TYPES.map(([key, name]) => `**${name}:** ${data.roles[key] ? `<@&${data.roles[key]}>` : 'Not set'}`).join('\n');
+      const embed = brandedEmbed('⚙️ Pixel Boosts Configuration', `${channelText}\n\n**Roles**\n${roleText}\n\n**Stripe:** ${data.stripeUrl ? 'Configured' : 'Not set'}`);
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+
+    if (interaction.commandName === 'setup') {
+      if (!await adminOnly(interaction)) return;
+      await interaction.deferReply({ ephemeral: true });
+      const results = [];
+      for (const panel of panelDefinitions()) results.push(await sendOrReplace(...panel));
+      const ok = results.filter(r => r.ok).length;
+      const failed = results.filter(r => !r.ok).map(r => `• ${r.reason}`);
+      return interaction.editReply(`Refreshed **${ok}** panels.${failed.length ? `\n\nNot sent:\n${failed.join('\n')}` : ''}`);
+    }
+
+    if (interaction.commandName === 'shop' || interaction.commandName === 'buy') {
+      return interaction.reply({
+        embeds: [brandedEmbed('🚀 Pixel Boosts Shop', `${priceLines()}\n\n**Stock:** ${data.stock} boosts\n\nOpen a private order before paying so staff can confirm availability.`)],
+        components: [orderButtons()],
+        ephemeral: true,
+      });
     }
 
     if (interaction.commandName === 'stock') {
       const sub = interaction.options.getSubcommand();
       if (sub === 'view') return interaction.reply({ embeds: [brandedEmbed('⚡ Current Stock', `Available: **${data.stock} boosts**`)], ephemeral: true });
-      if (!adminOnly(interaction)) return;
+      if (!await adminOnly(interaction)) return;
       data.stock = interaction.options.getInteger('amount');
       saveData();
       await refreshPanel('stock');
-      return interaction.reply({ content: `Stock updated to **${data.stock} boosts** and the stock panel was refreshed.`, ephemeral: true });
+      return interaction.reply({ content: `Stock updated to **${data.stock} boosts**.`, ephemeral: true });
     }
 
     if (interaction.commandName === 'price') {
       const sub = interaction.options.getSubcommand();
       if (sub === 'view') return interaction.reply({ embeds: [brandedEmbed('💰 Current Prices', priceLines())], ephemeral: true });
-      if (!adminOnly(interaction)) return;
+      if (!await adminOnly(interaction)) return;
       const boosts = String(interaction.options.getInteger('boosts'));
       const price = interaction.options.getString('price').trim();
       data.prices[boosts] = price;
@@ -325,7 +410,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.commandName === 'offer') {
-      if (!adminOnly(interaction)) return;
+      if (!await adminOnly(interaction)) return;
       data.offer = interaction.options.getString('text');
       saveData();
       await refreshPanel('special-offers');
@@ -333,7 +418,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.commandName === 'announce' || interaction.commandName === 'embed') {
-      if (!adminOnly(interaction)) return;
+      if (!await adminOnly(interaction)) return;
       const channel = interaction.options.getChannel('channel');
       const title = interaction.options.getString('title');
       const description = interaction.options.getString(interaction.commandName === 'announce' ? 'message' : 'description');
@@ -343,60 +428,57 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.commandName === 'complete-order') {
-      if (!adminOnly(interaction)) return;
+      if (!await adminOnly(interaction)) return;
+      const targetId = data.channels['completed-orders'];
+      const target = targetId ? await client.channels.fetch(targetId).catch(() => null) : null;
+      if (!target?.isTextBased()) return interaction.reply({ content: 'Set the completed-orders channel first with `/setchannel`.', ephemeral: true });
       const customer = interaction.options.getUser('customer');
       const boosts = interaction.options.getInteger('boosts');
       const amount = interaction.options.getString('amount');
       const duration = interaction.options.getString('duration');
-      const target = await client.channels.fetch(process.env.COMPLETED_ORDERS_CHANNEL_ID).catch(() => null);
-      if (!target?.isTextBased()) return interaction.reply({ content: 'COMPLETED_ORDERS_CHANNEL_ID is missing or invalid.', ephemeral: true });
       const orderId = String(++data.orderCounter).padStart(4, '0');
-      saveData();
       await target.send({ embeds: [brandedEmbed(`🏆 Order #${orderId} Completed`, `**Customer:** ${customer}\n**Package:** ${boosts} boosts\n**Duration:** ${duration}\n**Amount:** ${amount}\n**Completed by:** ${interaction.user}`)] });
-      if (process.env.CUSTOMER_ROLE_ID) {
-        const member = await interaction.guild.members.fetch(customer.id).catch(() => null);
-        const role = interaction.guild.roles.cache.get(process.env.CUSTOMER_ROLE_ID);
-        if (member && role) await member.roles.add(role).catch(() => {});
-      }
-      if (data.stock >= boosts) {
-        data.stock -= boosts;
-        saveData();
-        await refreshPanel('stock');
-      }
+      const member = await interaction.guild.members.fetch(customer.id).catch(() => null);
+      const role = data.roles.customer ? interaction.guild.roles.cache.get(data.roles.customer) : null;
+      if (member && role) await member.roles.add(role).catch(() => {});
+      if (data.stock >= boosts) data.stock -= boosts;
+      saveData();
+      await refreshPanel('stock');
       return interaction.reply({ content: 'Completed order logged and customer role processed.', ephemeral: true });
     }
 
     if (interaction.commandName === 'close-ticket') {
       const canClose = isAdmin(interaction) || interaction.channel?.topic?.includes(`Customer: ${interaction.user.id}`);
-      if (!canClose || !interaction.channel?.name?.startsWith('order-')) return interaction.reply({ content: 'Use this inside your order ticket.', ephemeral: true });
+      if (!canClose || !interaction.channel?.topic?.startsWith('Pixel Boosts order')) return interaction.reply({ content: 'Use this inside your order ticket.', ephemeral: true });
       await interaction.reply('Closing this ticket in 5 seconds…');
       setTimeout(() => interaction.channel.delete('Pixel Boosts ticket closed').catch(() => {}), 5000);
     }
 
     if (interaction.commandName === 'help') {
-      const description = [
+      return interaction.reply({ embeds: [brandedEmbed('🤖 Pixel Boosts Bot Help', [
         '**Customer commands**',
-        '`/shop` — View packages, stock and open an order',
+        '`/shop` or `/buy` — View packages and open an order',
         '`/stock view` — Check current availability',
-        '`/price view` — View package prices',
+        '`/price view` — View current prices',
         '`/close-ticket` — Close your order ticket',
         '',
-        '**Administrator commands**',
-        '`/setup` — Send or refresh every server panel',
-        '`/stock set` — Update live stock',
-        '`/price set` — Update a package price',
-        '`/offer` — Update the special offer',
-        '`/announce` — Send a branded announcement',
-        '`/embed` — Send a custom branded embed',
-        '`/complete-order` — Log delivery and assign Customer role',
-      ].join('\n');
-      return interaction.reply({ embeds: [brandedEmbed('🤖 Pixel Boosts Bot Help', description)], ephemeral: true });
+        '**Administrator setup**',
+        '`/setchannel` — Assign every panel channel',
+        '`/setrole` — Assign Member, Customer, Staff and Support roles',
+        '`/setstripe` — Save your Stripe Payment Link',
+        '`/config` — View current configuration',
+        '`/setup` — Send or refresh all configured panels',
+        '',
+        '**Store management**',
+        '`/stock set` • `/price set` • `/offer`',
+        '`/announce` • `/embed` • `/complete-order`',
+      ].join('\n'))], ephemeral: true });
     }
   } catch (error) {
     console.error('Interaction error:', error);
-    const message = { content: 'Something went wrong while processing that action.', ephemeral: true };
-    if (interaction.deferred || interaction.replied) await interaction.followUp(message).catch(() => {});
-    else await interaction.reply(message).catch(() => {});
+    const payload = { content: 'Something went wrong while processing that action.', ephemeral: true };
+    if (interaction.deferred || interaction.replied) await interaction.followUp(payload).catch(() => {});
+    else await interaction.reply(payload).catch(() => {});
   }
 });
 
