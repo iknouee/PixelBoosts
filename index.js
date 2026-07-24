@@ -35,13 +35,15 @@ const BRAND = {
 const DATA_FILE = path.join(__dirname, 'data.json');
 const DEFAULT_DATA = {
   stock: 0,
-  prices: {
-    '2': '£8.99',
-    '4': '£16.99',
-    '6': '£24.99',
-    '8': '£32.99',
-    '14': '£54.99',
-  },
+  products: [
+    { id: '6x-1m', name: '6 Boosts', boosts: 6, months: 1, price: 7.50, description: 'Great for unlocking Level 1 perks.' },
+    { id: '14x-1m', name: '14 Boosts', boosts: 14, months: 1, price: 15.00, description: 'Best-value one-month package.' },
+    { id: '28x-1m', name: '28 Boosts', boosts: 28, months: 1, price: 28.00, description: 'Ideal for larger servers.' },
+    { id: '36x-1m', name: '36 Boosts', boosts: 36, months: 1, price: 35.00, description: 'Maximum one-month package.' },
+    { id: '14x-3m', name: '14 Boosts', boosts: 14, months: 3, price: 40.00, description: 'Three months at a reduced bundle price.' },
+    { id: '28x-3m', name: '28 Boosts', boosts: 28, months: 3, price: 75.00, description: 'Three-month bulk package.' },
+    { id: '36x-3m', name: '36 Boosts', boosts: 36, months: 3, price: 95.00, description: 'Premium three-month package.' },
+  ],
   offer: 'No active special offer right now. Check back soon!',
   orderCounter: 0,
   stripeUrl: '',
@@ -74,7 +76,7 @@ function loadData() {
     return {
       ...cloneDefault(),
       ...saved,
-      prices: { ...DEFAULT_DATA.prices, ...(saved.prices || {}) },
+      products: Array.isArray(saved.products) && saved.products.length ? saved.products : cloneDefault().products,
       channels: { ...(saved.channels || {}) },
       roles: { ...(saved.roles || {}) },
       panels: { ...(saved.panels || {}) },
@@ -93,8 +95,16 @@ function loadData() {
 }
 
 let data = loadData();
+let cloudSaveTimer = null;
+let cloudDataMessageId = null;
+const CLOUD_CHANNEL_TOPIC = 'PIXEL_BOOSTS_BOT_DATA_DO_NOT_DELETE';
+
 function saveData() {
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+  if (client?.isReady?.()) {
+    clearTimeout(cloudSaveTimer);
+    cloudSaveTimer = setTimeout(() => syncDataToDiscord().catch(error => console.error('Cloud save failed:', error)), 800);
+  }
 }
 
 const client = new Client({
@@ -132,20 +142,34 @@ function money(value) {
   return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(Number(value) || 0);
 }
 
-function discountedPriceLabel(label) {
+function discountedMoney(value) {
   const percent = Number(data.discountPercent) || 0;
-  if (percent <= 0) return label;
-  const original = parseMoney(label);
-  if (!original) return label;
-  const discounted = original * (1 - percent / 100);
-  return `~~${label}~~ **${money(discounted)}**`;
+  const original = Number(value) || 0;
+  return percent > 0 ? original * (1 - percent / 100) : original;
 }
 
-function priceLines() {
-  return Object.entries(data.prices)
-    .sort((a, b) => Number(a[0]) - Number(b[0]))
-    .map(([boosts, price]) => `**${boosts} Boosts** — ${discountedPriceLabel(price)} / month`)
-    .join('\n');
+function productLines() {
+  const products = [...data.products].sort((a, b) => (a.months - b.months) || (a.boosts - b.boosts));
+  const groups = new Map();
+  for (const product of products) {
+    const key = Number(product.months) || 1;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(product);
+  }
+  return [...groups.entries()].map(([months, items]) => {
+    const heading = `**${months} Month${months === 1 ? '' : 's'}**`;
+    const lines = items.map(product => {
+      const original = Number(product.price) || 0;
+      const discounted = discountedMoney(original);
+      const price = data.discountPercent ? `~~${money(original)}~~ **${money(discounted)}**` : `**${money(original)}**`;
+      return `• **${product.boosts}x Boosts** — ${price}${product.description ? `\n  ${product.description}` : ''}`;
+    });
+    return `${heading}\n${lines.join('\n')}`;
+  }).join('\n\n');
+}
+
+function findProduct(productId) {
+  return data.products.find(product => product.id === productId);
 }
 
 function storeStatusText() {
@@ -200,11 +224,22 @@ const commands = [
     .addIntegerOption(o => o.setName('amount').setDescription('Boosts to add').setRequired(true).setMinValue(1))
     .addBooleanOption(o => o.setName('announce').setDescription('Post in announcements and ping Stock Alerts'))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-  new SlashCommandBuilder().setName('price').setDescription('View or update package prices')
-    .addSubcommand(s => s.setName('view').setDescription('View all prices'))
-    .addSubcommand(s => s.setName('set').setDescription('Set a package price')
-      .addIntegerOption(o => o.setName('boosts').setDescription('Number of boosts').setRequired(true).setMinValue(1).setMaxValue(100))
-      .addStringOption(o => o.setName('price').setDescription('Example: £8.99').setRequired(true).setMaxLength(30))),
+  new SlashCommandBuilder().setName('package').setDescription('View or manage shop packages')
+    .addSubcommand(s => s.setName('list').setDescription('View all shop packages'))
+    .addSubcommand(s => s.setName('add').setDescription('Add a package')
+      .addIntegerOption(o => o.setName('boosts').setDescription('Number of boosts').setRequired(true).setMinValue(1).setMaxValue(500))
+      .addIntegerOption(o => o.setName('months').setDescription('Duration in months').setRequired(true).setMinValue(1).setMaxValue(24))
+      .addNumberOption(o => o.setName('price').setDescription('Price in GBP, e.g. 15').setRequired(true).setMinValue(0.01))
+      .addStringOption(o => o.setName('description').setDescription('Short package description').setMaxLength(150)))
+    .addSubcommand(s => s.setName('edit').setDescription('Edit an existing package')
+      .addStringOption(o => o.setName('id').setDescription('Package ID from /package list').setRequired(true))
+      .addIntegerOption(o => o.setName('boosts').setDescription('New boost amount').setMinValue(1).setMaxValue(500))
+      .addIntegerOption(o => o.setName('months').setDescription('New duration').setMinValue(1).setMaxValue(24))
+      .addNumberOption(o => o.setName('price').setDescription('New price in GBP').setMinValue(0.01))
+      .addStringOption(o => o.setName('description').setDescription('New description').setMaxLength(150)))
+    .addSubcommand(s => s.setName('remove').setDescription('Remove a package')
+      .addStringOption(o => o.setName('id').setDescription('Package ID from /package list').setRequired(true)))
+    .addSubcommand(s => s.setName('reset').setDescription('Restore the recommended default packages')),
   new SlashCommandBuilder().setName('discount').setDescription('Manage a store-wide percentage discount')
     .addSubcommand(s => s.setName('view').setDescription('View the active discount'))
     .addSubcommand(s => s.setName('set').setDescription('Set the discount').addIntegerOption(o => o.setName('percent').setDescription('Percentage off').setRequired(true).setMinValue(1).setMaxValue(90)))
@@ -299,7 +334,7 @@ function panelDefinitions() {
     ['announcements', brandedEmbed('📢 Announcements', 'Official Pixel Boosts updates, restocks, package changes and important notices are posted here.')],
     ['faq', brandedEmbed('❓ Frequently Asked Questions', [
       '**How do I order?**\nOpen a private ticket through the create-order panel.',
-      '**How long do boosts last?**\nThe standard packages are monthly unless your ticket says otherwise.',
+      '**How long do boosts last?**\nPackages are available for one or three months, as shown in the shop.',
       '**Do you need my Discord login?**\nNo. We never ask for passwords, tokens, QR codes or cookies.',
       '**When does delivery start?**\nAfter payment is confirmed and stock is available.',
       '**Can prices change?**\nYes, until your final quote is confirmed in the ticket.',
@@ -312,8 +347,8 @@ function panelDefinitions() {
       '**5. Delivery**\nYour order is processed and logged once completed.',
     ].join('\n\n'))],
     ['partners', brandedEmbed('📜 Partnerships', 'To discuss a partnership, open a ticket and include your server size, invite link, audience and what you are offering.')],
-    ['boost-packages', brandedEmbed('💎 Boost Packages', `${priceLines()}${discountNote}\n\nAll packages are subject to live stock and staff confirmation. Custom quantities can be quoted in a ticket.`), orderButtons()],
-    ['pricing', brandedEmbed('💰 Current Pricing', `${priceLines()}${discountNote}\n\nYour confirmed ticket quote is final before payment.`), orderButtons()],
+    ['boost-packages', brandedEmbed('💎 Boost Packages', `${productLines()}${discountNote}\n\nAll packages are subject to live stock and staff confirmation. Custom quantities can be quoted in a ticket.`), orderButtons()],
+    ['pricing', brandedEmbed('💰 Current Pricing', `${productLines()}${discountNote}\n\nYour confirmed ticket quote is final before payment.`), orderButtons()],
     ['stock', brandedEmbed('⚡ Instant Stock', data.stock > 0 ? `**${data.stock} boosts** are currently available.\n\n${data.storeOpen ? 'Open a ticket to reserve stock.' : 'The store is currently closed.'}` : '**Currently out of stock.**\n\nWatch this channel for the next restock.')],
     ['special-offers', brandedEmbed('🎁 Special Offers', data.offer)],
     ['create-order', brandedEmbed('🎫 Create an Order', data.storeOpen ? 'Press **Create an Order** below to open a private ticket. Staff will confirm your package, stock and final price before you pay.' : 'The store is currently **closed**. Ordering will reopen soon.'), orderButtons()],
@@ -389,8 +424,98 @@ async function postLog(key, embed) {
   if (channel?.isTextBased()) await channel.send({ embeds: [embed] }).catch(() => {});
 }
 
+async function getCloudDataChannel(guild) {
+  let channel = guild.channels.cache.find(c => c.type === ChannelType.GuildText && c.topic === CLOUD_CHANNEL_TOPIC);
+  if (channel) return channel;
+  channel = await guild.channels.create({
+    name: 'pixel-bot-data',
+    type: ChannelType.GuildText,
+    topic: CLOUD_CHANNEL_TOPIC,
+    permissionOverwrites: [
+      { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+      { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageMessages] },
+    ],
+    reason: 'Persistent Pixel Boosts bot configuration',
+  });
+  return channel;
+}
+
+async function loadDataFromDiscord(guild) {
+  const channel = guild.channels.cache.find(c => c.type === ChannelType.GuildText && c.topic === CLOUD_CHANNEL_TOPIC);
+  if (!channel) return false;
+  const messages = await channel.messages.fetch({ limit: 20 }).catch(() => null);
+  const message = messages?.find(m => m.author.id === client.user.id && m.attachments.some(a => a.name === 'pixel-boosts-data.json'));
+  const attachment = message?.attachments.find(a => a.name === 'pixel-boosts-data.json');
+  if (!attachment) return false;
+  const response = await fetch(attachment.url);
+  if (!response.ok) return false;
+  const remote = await response.json();
+  data = {
+    ...cloneDefault(),
+    ...remote,
+    products: Array.isArray(remote.products) && remote.products.length ? remote.products : cloneDefault().products,
+    channels: { ...(remote.channels || {}) }, roles: { ...(remote.roles || {}) }, panels: { ...(remote.panels || {}) },
+    coupons: { ...(remote.coupons || {}) }, stats: { ...cloneDefault().stats, ...(remote.stats || {}), packageSales: { ...((remote.stats || {}).packageSales || {}) }, sales: Array.isArray((remote.stats || {}).sales) ? remote.stats.sales : [] },
+  };
+  cloudDataMessageId = message.id;
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+  console.log('Loaded configuration from Discord cloud storage.');
+  return true;
+}
+
+async function syncDataToDiscord() {
+  const guild = client.guilds.cache.get(process.env.GUILD_ID);
+  if (!guild) return;
+  const channel = await getCloudDataChannel(guild);
+  const payload = { content: 'Pixel Boosts persistent configuration. Do not delete this channel or message.', files: [{ attachment: Buffer.from(JSON.stringify(data, null, 2)), name: 'pixel-boosts-data.json' }] };
+  let message = cloudDataMessageId ? await channel.messages.fetch(cloudDataMessageId).catch(() => null) : null;
+  if (!message) {
+    const messages = await channel.messages.fetch({ limit: 20 }).catch(() => null);
+    message = messages?.find(m => m.author.id === client.user.id && m.attachments.some(a => a.name === 'pixel-boosts-data.json')) || null;
+  }
+  if (message) await message.edit(payload);
+  else message = await channel.send(payload);
+  cloudDataMessageId = message.id;
+}
+
+function normalizeName(name) {
+  return String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+async function autoDetectConfiguration(guild) {
+  const aliases = {
+    rules: ['rules'], announcements: ['announcements'], faq: ['faq'], 'how-it-works': ['how-it-works'], partners: ['partners'],
+    'boost-packages': ['boost-packages', 'packages'], pricing: ['pricing', 'prices'], stock: ['instant-stock', 'stock'],
+    'special-offers': ['special-offers', 'offers'], 'create-order': ['create-order', 'order-here'], 'order-status': ['order-status'],
+    'payment-methods': ['payment-methods', 'payments'], reviews: ['reviews'], proof: ['proof'], 'video-vouches': ['video-vouches'],
+    'completed-orders': ['completed-orders'], status: ['store-status', 'status'], logs: ['logs'], 'sales-log': ['sales-log'],
+  };
+  for (const [key, names] of Object.entries(aliases)) {
+    if (data.channels[key]) continue;
+    const found = guild.channels.cache.find(c => c.isTextBased?.() && names.includes(normalizeName(c.name)));
+    if (found) data.channels[key] = found.id;
+  }
+  if (!data.channels['ticket-category']) {
+    const category = guild.channels.cache.find(c => c.type === ChannelType.GuildCategory && ['orders', 'tickets', 'order-tickets'].includes(normalizeName(c.name)));
+    if (category) data.channels['ticket-category'] = category.id;
+  }
+  const roleAliases = { member: ['member'], customer: ['customer', 'verified-buyer'], support: ['support'], staff: ['staff'], 'stock-alerts': ['stock-alerts'] };
+  for (const [key, names] of Object.entries(roleAliases)) {
+    if (data.roles[key]) continue;
+    const role = guild.roles.cache.find(r => names.includes(normalizeName(r.name)));
+    if (role) data.roles[key] = role.id;
+  }
+  saveData();
+}
+
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
+  const guild = client.guilds.cache.get(process.env.GUILD_ID);
+  if (guild) {
+    await loadDataFromDiscord(guild).catch(error => console.error('Cloud load failed:', error));
+    await autoDetectConfiguration(guild).catch(error => console.error('Auto configuration failed:', error));
+    await syncDataToDiscord().catch(error => console.error('Initial cloud save failed:', error));
+  }
   await registerCommands().catch(error => console.error('Command registration failed:', error));
 
   const activities = [
@@ -540,7 +665,7 @@ client.on('interactionCreate', async interaction => {
 
     if (interaction.commandName === 'shop' || interaction.commandName === 'buy') {
       return interaction.reply({
-        embeds: [brandedEmbed('🚀 Pixel Boosts Shop', `${priceLines()}\n\n**Stock:** ${data.stock} boosts\n**Store:** ${storeStatusText()}\n\n${data.storeOpen ? 'Open a private order before paying so staff can confirm availability.' : 'Ordering is temporarily unavailable.'}`)],
+        embeds: [brandedEmbed('🚀 Pixel Boosts Shop', `${productLines()}\n\n**Stock:** ${data.stock} boosts\n**Store:** ${storeStatusText()}\n\n${data.storeOpen ? 'Open a private order before paying so staff can confirm availability.' : 'Ordering is temporarily unavailable.'}`)],
         components: [orderButtons()],
         ephemeral: true,
       });
@@ -579,16 +704,53 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply({ content: `Added **${amount} boosts**. New stock: **${data.stock}**.`, ephemeral: true });
     }
 
-    if (interaction.commandName === 'price') {
+    if (interaction.commandName === 'package') {
       const sub = interaction.options.getSubcommand();
-      if (sub === 'view') return interaction.reply({ embeds: [brandedEmbed('💰 Current Prices', priceLines())], ephemeral: true });
+      if (sub === 'list') {
+        const ids = [...data.products].sort((a, b) => (a.months - b.months) || (a.boosts - b.boosts))
+          .map(p => `\`${p.id}\` — **${p.boosts}x boosts / ${p.months} month${p.months === 1 ? '' : 's'}** — ${money(p.price)}`)
+          .join('\n');
+        return interaction.reply({ embeds: [brandedEmbed('📦 Shop Packages', `${productLines()}\n\n**Package IDs**\n${ids}`)], ephemeral: true });
+      }
       if (!await adminOnly(interaction)) return;
-      const boosts = String(interaction.options.getInteger('boosts'));
-      const price = interaction.options.getString('price').trim();
-      data.prices[boosts] = price;
+      if (sub === 'reset') {
+        data.products = cloneDefault().products;
+        saveData();
+        await refreshCommercePanels();
+        return interaction.reply({ content: 'Recommended packages restored.', ephemeral: true });
+      }
+      const id = interaction.options.getString('id');
+      if (sub === 'remove') {
+        const before = data.products.length;
+        data.products = data.products.filter(p => p.id !== id);
+        if (data.products.length === before) return interaction.reply({ content: 'Package ID not found.', ephemeral: true });
+        saveData();
+        await refreshCommercePanels();
+        return interaction.reply({ content: `Removed package \`${id}\`.`, ephemeral: true });
+      }
+      if (sub === 'add') {
+        const boosts = interaction.options.getInteger('boosts');
+        const months = interaction.options.getInteger('months');
+        const price = interaction.options.getNumber('price');
+        const description = interaction.options.getString('description') || '';
+        let newId = `${boosts}x-${months}m`;
+        let suffix = 2;
+        while (findProduct(newId)) newId = `${boosts}x-${months}m-${suffix++}`;
+        data.products.push({ id: newId, name: `${boosts} Boosts`, boosts, months, price, description });
+        saveData();
+        await refreshCommercePanels();
+        return interaction.reply({ content: `Added package \`${newId}\` for **${money(price)}**.`, ephemeral: true });
+      }
+      const product = findProduct(id);
+      if (!product) return interaction.reply({ content: 'Package ID not found. Run `/package list`.', ephemeral: true });
+      product.boosts = interaction.options.getInteger('boosts') ?? product.boosts;
+      product.months = interaction.options.getInteger('months') ?? product.months;
+      product.price = interaction.options.getNumber('price') ?? product.price;
+      product.description = interaction.options.getString('description') ?? product.description;
+      product.name = `${product.boosts} Boosts`;
       saveData();
       await refreshCommercePanels();
-      return interaction.reply({ content: `Updated **${boosts} boosts** to **${price}**.`, ephemeral: true });
+      return interaction.reply({ content: `Updated package \`${product.id}\`.`, ephemeral: true });
     }
 
     if (interaction.commandName === 'discount') {
@@ -745,7 +907,7 @@ client.on('interactionCreate', async interaction => {
         '**Customer commands**',
         '`/shop` or `/buy` — View packages and open an order',
         '`/stock view` — Check availability',
-        '`/price view` — View prices',
+        '`/package list` — View packages and prices',
         '`/coupon redeem` — Check a coupon code',
         '`/review` — Leave a customer review',
         '`/close-ticket` — Close your order ticket',
@@ -754,7 +916,7 @@ client.on('interactionCreate', async interaction => {
         '`/setchannel` • `/setrole` • `/setstripe` • `/config` • `/setup`',
         '',
         '**Store management**',
-        '`/store` • `/restock` • `/stock set` • `/price set`',
+        '`/store` • `/restock` • `/stock set` • `/package`',
         '`/discount` • `/coupon` • `/offer`',
         '`/announce` • `/embed` • `/complete-order`',
         '`/dashboard` • `/stats`',
