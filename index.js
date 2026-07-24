@@ -46,7 +46,11 @@ const DEFAULT_DATA = {
   ],
   offer: 'No active special offer right now. Check back soon!',
   orderCounter: 0,
-  stripeUrl: '',
+  bank: {
+    accountName: 'James',
+    sortCode: '07-09-76',
+    accountNumber: '03545533',
+  },
   storeOpen: true,
   discountPercent: 0,
   channels: {},
@@ -77,6 +81,7 @@ function loadData() {
       ...cloneDefault(),
       ...saved,
       products: Array.isArray(saved.products) && saved.products.length ? saved.products : cloneDefault().products,
+      bank: { ...cloneDefault().bank, ...(saved.bank || {}) },
       channels: { ...(saved.channels || {}) },
       roles: { ...(saved.roles || {}) },
       panels: { ...(saved.panels || {}) },
@@ -211,12 +216,15 @@ const commands = [
     .addStringOption(o => o.setName('type').setDescription('What this role is for').setRequired(true).addChoices(...roleChoices))
     .addRoleOption(o => o.setName('role').setDescription('Role to use').setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-  new SlashCommandBuilder().setName('setstripe').setDescription('Set the Stripe payment-link URL')
-    .addStringOption(o => o.setName('url').setDescription('Example: https://buy.stripe.com/...').setRequired(true))
+  new SlashCommandBuilder().setName('setbank').setDescription('Set the bank-transfer details shown by the bot')
+    .addStringOption(o => o.setName('account_name').setDescription('Account holder name').setRequired(true).setMaxLength(100))
+    .addStringOption(o => o.setName('sort_code').setDescription('UK sort code, e.g. 07-09-76').setRequired(true).setMaxLength(12))
+    .addStringOption(o => o.setName('account_number').setDescription('UK account number').setRequired(true).setMaxLength(20))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-  new SlashCommandBuilder().setName('config').setDescription('View the current channel, role and Stripe setup').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('config').setDescription('View the current channel, role and bank setup').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('shop').setDescription('View packages, stock and ordering information'),
-  new SlashCommandBuilder().setName('buy').setDescription('Open the order panel and Stripe checkout'),
+  new SlashCommandBuilder().setName('buy').setDescription('Open the order panel'),
+  new SlashCommandBuilder().setName('bank').setDescription('View the official bank-transfer details'),
   new SlashCommandBuilder().setName('stock').setDescription('View or update boost stock')
     .addSubcommand(s => s.setName('view').setDescription('View current stock'))
     .addSubcommand(s => s.setName('set').setDescription('Set current stock').addIntegerOption(o => o.setName('amount').setDescription('Available boosts').setRequired(true).setMinValue(0))),
@@ -300,17 +308,32 @@ function orderButtons() {
       .setStyle(data.storeOpen ? ButtonStyle.Primary : ButtonStyle.Secondary)
       .setDisabled(!data.storeOpen),
   );
-  if (data.stripeUrl && data.storeOpen) {
-    row.addComponents(new ButtonBuilder().setLabel('Pay with Stripe').setEmoji('💳').setStyle(ButtonStyle.Link).setURL(data.stripeUrl));
-  }
   return row;
+}
+
+function bankDetailsText() {
+  const bank = data.bank || {};
+  return [
+    '**Payment method: Bank Transfer**',
+    '',
+    `**Account name**\n\`${bank.accountName || 'Not configured'}\``,
+    `**Sort code**\n\`${bank.sortCode || 'Not configured'}\``,
+    `**Account number**\n\`${bank.accountNumber || 'Not configured'}\``,
+    '',
+    'Open an order ticket and wait for staff to confirm your package and final total **before sending payment**.',
+    'After paying, send proof of payment inside your private ticket. Do not post bank or payment information publicly.',
+  ].join('\n');
+}
+
+function bankEmbed() {
+  return brandedEmbed('💳 Bank Transfer', bankDetailsText());
 }
 
 function statusEmbed() {
   return brandedEmbed('⚡ Pixel Boosts Status', [
     `**Store:** ${storeStatusText()}`,
     `**Available Stock:** ${data.stock} boosts`,
-    `**Payments:** ${data.stripeUrl ? 'Stripe configured' : 'Not configured'}`,
+    '**Payments:** Bank transfer',
     `**Active Discount:** ${data.discountPercent ? `${data.discountPercent}% off` : 'None'}`,
     `**Last Restock:** ${relativeTime(data.stats.lastRestockAt)}`,
     '',
@@ -343,7 +366,7 @@ function panelDefinitions() {
       '**1. Pick a package**\nCheck the prices and live stock.',
       '**2. Open an order ticket**\nTell staff the amount and duration you need.',
       '**3. Receive confirmation**\nStaff confirms stock and your final total.',
-      '**4. Pay securely with Stripe**\nUse the official Stripe link only.',
+      '**4. Pay by bank transfer**\nUse only the official bank details shown by the bot after staff confirms your total.',
       '**5. Delivery**\nYour order is processed and logged once completed.',
     ].join('\n\n'))],
     ['partners', brandedEmbed('📜 Partnerships', 'To discuss a partnership, open a ticket and include your server size, invite link, audience and what you are offering.')],
@@ -353,7 +376,7 @@ function panelDefinitions() {
     ['special-offers', brandedEmbed('🎁 Special Offers', data.offer)],
     ['create-order', brandedEmbed('🎫 Create an Order', data.storeOpen ? 'Press **Create an Order** below to open a private ticket. Staff will confirm your package, stock and final price before you pay.' : 'The store is currently **closed**. Ordering will reopen soon.'), orderButtons()],
     ['order-status', brandedEmbed('📦 Order Status', 'Order updates are posted inside each private ticket. Completed orders are logged after delivery.')],
-    ['payment-methods', brandedEmbed('💳 Secure Payments', data.stripeUrl ? 'Payments are accepted securely through **Stripe Checkout**.\n\nOnly use the official button below or the link supplied by verified staff in your private ticket.' : 'Stripe is the only supported payment method. The owner has not configured the Stripe payment link yet.'), data.stripeUrl && data.storeOpen ? orderButtons() : null],
+    ['payment-methods', bankEmbed()],
     ['reviews', brandedEmbed('⭐ Customer Reviews', 'Completed an order? Use `/review` to leave an honest rating about your package, delivery and support experience. Never post private payment details.')],
     ['proof', brandedEmbed('📸 Delivery Proof', 'Privacy-safe delivery confirmations may be posted here. Sensitive details must always be hidden.')],
     ['video-vouches', brandedEmbed('🎥 Video Vouches', 'Customers can share genuine video vouches after a completed order.')],
@@ -576,7 +599,6 @@ client.on('interactionCreate', async interaction => {
         const closeRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId('close_order').setLabel('Close Ticket').setEmoji('🔒').setStyle(ButtonStyle.Danger),
         );
-        if (data.stripeUrl) closeRow.addComponents(new ButtonBuilder().setLabel('Pay with Stripe').setEmoji('💳').setStyle(ButtonStyle.Link).setURL(data.stripeUrl));
 
         await channel.send({
           content: `${interaction.user}${data.roles.support ? ` <@&${data.roles.support}>` : ''}`,
@@ -588,6 +610,9 @@ client.on('interactionCreate', async interaction => {
             '• Coupon code, if you have one',
             '',
             'Wait for staff to confirm your package and final total before paying.',
+            '',
+            bankDetailsText(),
+            '',
             '**Never share your Discord password, token, QR code or cookies.**',
           ].join('\n'))],
           components: [closeRow],
@@ -633,23 +658,33 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply({ content: `Set **${type}** role to ${role}.`, ephemeral: true });
     }
 
-    if (interaction.commandName === 'setstripe') {
+    if (interaction.commandName === 'setbank') {
       if (!await adminOnly(interaction)) return;
-      const url = interaction.options.getString('url').trim();
-      if (!/^https:\/\/(buy\.stripe\.com|checkout\.stripe\.com)\//i.test(url)) {
-        return interaction.reply({ content: 'Please provide a valid Stripe Checkout or Stripe Payment Link URL.', ephemeral: true });
+      const accountName = interaction.options.getString('account_name').trim();
+      const sortCodeRaw = interaction.options.getString('sort_code').replace(/\D/g, '');
+      const accountNumber = interaction.options.getString('account_number').replace(/\s/g, '');
+      if (sortCodeRaw.length !== 6) {
+        return interaction.reply({ content: 'The sort code must contain exactly 6 digits.', ephemeral: true });
       }
-      data.stripeUrl = url;
+      if (!/^\d{8}$/.test(accountNumber)) {
+        return interaction.reply({ content: 'The account number must contain exactly 8 digits.', ephemeral: true });
+      }
+      data.bank = {
+        accountName,
+        sortCode: `${sortCodeRaw.slice(0, 2)}-${sortCodeRaw.slice(2, 4)}-${sortCodeRaw.slice(4, 6)}`,
+        accountNumber,
+      };
       saveData();
-      await refreshCommercePanels();
-      return interaction.reply({ content: 'Stripe payment link saved and relevant panels refreshed.', ephemeral: true });
+      await refreshPanel('payment-methods');
+      return interaction.reply({ content: 'Bank-transfer details saved and the payment panel was refreshed.', ephemeral: true });
     }
 
     if (interaction.commandName === 'config') {
       if (!await adminOnly(interaction)) return;
       const channelText = CHANNEL_TYPES.map(([key, name]) => `**${name}:** ${data.channels[key] ? `<#${data.channels[key]}>` : 'Not set'}`).join('\n');
       const roleText = ROLE_TYPES.map(([key, name]) => `**${name}:** ${data.roles[key] ? `<@&${data.roles[key]}>` : 'Not set'}`).join('\n');
-      const embed = brandedEmbed('⚙️ Pixel Boosts Configuration', `${channelText}\n\n**Roles**\n${roleText}\n\n**Stripe:** ${data.stripeUrl ? 'Configured' : 'Not set'}\n**Store:** ${storeStatusText()}`);
+      const bankStatus = data.bank?.accountName && data.bank?.sortCode && data.bank?.accountNumber ? 'Configured' : 'Not set';
+      const embed = brandedEmbed('⚙️ Pixel Boosts Configuration', `${channelText}\n\n**Roles**\n${roleText}\n\n**Bank transfer:** ${bankStatus}\n**Store:** ${storeStatusText()}`);
       return interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
@@ -661,6 +696,10 @@ client.on('interactionCreate', async interaction => {
       const ok = results.filter(r => r.ok).length;
       const failed = results.filter(r => !r.ok).map(r => `• ${r.reason}`);
       return interaction.editReply(`Refreshed **${ok}** panels.${failed.length ? `\n\nNot sent:\n${failed.join('\n')}` : ''}`);
+    }
+
+    if (interaction.commandName === 'bank') {
+      return interaction.reply({ embeds: [bankEmbed()], ephemeral: true });
     }
 
     if (interaction.commandName === 'shop' || interaction.commandName === 'buy') {
@@ -906,6 +945,7 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply({ embeds: [brandedEmbed('🤖 Pixel Boosts Bot Help', [
         '**Customer commands**',
         '`/shop` or `/buy` — View packages and open an order',
+        '`/bank` — View the official bank-transfer details',
         '`/stock view` — Check availability',
         '`/package list` — View packages and prices',
         '`/coupon redeem` — Check a coupon code',
@@ -913,7 +953,7 @@ client.on('interactionCreate', async interaction => {
         '`/close-ticket` — Close your order ticket',
         '',
         '**Administrator setup**',
-        '`/setchannel` • `/setrole` • `/setstripe` • `/config` • `/setup`',
+        '`/setchannel` • `/setrole` • `/setbank` • `/config` • `/setup`',
         '',
         '**Store management**',
         '`/store` • `/restock` • `/stock set` • `/package`',
