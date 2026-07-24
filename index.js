@@ -225,7 +225,8 @@ const commands = [
   new SlashCommandBuilder().setName('config').setDescription('View the current channel, role and bank setup').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('shop').setDescription('View packages, stock and ordering information'),
   new SlashCommandBuilder().setName('buy').setDescription('Open the order panel'),
-  new SlashCommandBuilder().setName('bank').setDescription('View the official bank-transfer details'),
+  new SlashCommandBuilder().setName('payment').setDescription('Send private bank-transfer details inside an order ticket')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('stock').setDescription('View or update boost stock')
     .addSubcommand(s => s.setName('view').setDescription('View current stock'))
     .addSubcommand(s => s.setName('set').setDescription('Set current stock').addIntegerOption(o => o.setName('amount').setDescription('Available boosts').setRequired(true).setMinValue(0))),
@@ -327,7 +328,21 @@ function bankDetailsText() {
 }
 
 function bankEmbed() {
-  return brandedEmbed('💳 Bank Transfer', bankDetailsText());
+  return brandedEmbed('💳 Payment Details', bankDetailsText());
+}
+
+function publicPaymentEmbed() {
+  return brandedEmbed('💳 Payment Methods', [
+    '**We currently accept Bank Transfer only.**',
+    '',
+    '1. Open an order ticket.',
+    '2. Wait for staff to confirm your package and final total.',
+    '3. Staff will send the payment details privately inside your ticket.',
+    '4. Send proof of payment in the same ticket after transferring.',
+    '',
+    '**Do not send payment before staff confirms your order.**',
+    'Bank details are never displayed publicly.',
+  ].join('\n'));
 }
 
 function statusEmbed() {
@@ -377,7 +392,7 @@ function panelDefinitions() {
     ['special-offers', brandedEmbed('🎁 Special Offers', data.offer)],
     ['create-order', brandedEmbed('🎫 Create an Order', data.storeOpen ? 'Press **Create an Order** below to open a private ticket. Staff will confirm your package, stock and final price before you pay.' : 'The store is currently **closed**. Ordering will reopen soon.'), orderButtons()],
     ['order-status', brandedEmbed('📦 Order Status', 'Order updates are posted inside each private ticket. Completed orders are logged after delivery.')],
-    ['payment-methods', bankEmbed()],
+    ['payment-methods', publicPaymentEmbed()],
     ['reviews', brandedEmbed('⭐ Customer Reviews', 'Completed an order? Use `/review` to leave an honest rating about your package, delivery and support experience. Never post private payment details.')],
     ['proof', brandedEmbed('📸 Delivery Proof', 'Privacy-safe delivery confirmations may be posted here. Sensitive details must always be hidden.')],
     ['video-vouches', brandedEmbed('🎥 Video Vouches', 'Customers can share genuine video vouches after a completed order.')],
@@ -611,8 +626,7 @@ client.on('interactionCreate', async interaction => {
             '• Coupon code, if you have one',
             '',
             'Wait for staff to confirm your package and final total before paying.',
-            '',
-            bankDetailsText(),
+            'A staff member will send the bank details privately with `/payment` once your order is confirmed.',
             '',
             '**Never share your Discord password, token, QR code or cookies.**',
           ].join('\n'))],
@@ -676,8 +690,7 @@ client.on('interactionCreate', async interaction => {
         accountNumber,
       };
       saveData();
-      await refreshPanel('payment-methods');
-      return interaction.reply({ content: 'Bank-transfer details saved and the payment panel was refreshed.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ content: 'Bank-transfer details saved. They will only be shown when an administrator uses `/payment` inside an order ticket.', flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'config') {
@@ -699,8 +712,20 @@ client.on('interactionCreate', async interaction => {
       return interaction.editReply(`Refreshed **${ok}** panels.${failed.length ? `\n\nNot sent:\n${failed.join('\n')}` : ''}`);
     }
 
-    if (interaction.commandName === 'bank') {
-      return interaction.reply({ embeds: [bankEmbed()], flags: MessageFlags.Ephemeral });
+    if (interaction.commandName === 'payment') {
+      if (!await adminOnly(interaction)) return;
+      if (!interaction.channel?.topic?.startsWith('Pixel Boosts order')) {
+        return interaction.reply({ content: 'Use `/payment` inside a Pixel Boosts order ticket.', flags: MessageFlags.Ephemeral });
+      }
+      const configured = data.bank?.accountName && data.bank?.sortCode && data.bank?.accountNumber;
+      if (!configured) {
+        return interaction.reply({ content: 'Bank details are not configured yet. Use `/setbank` first.', flags: MessageFlags.Ephemeral });
+      }
+      await interaction.channel.send({
+        embeds: [bankEmbed()],
+        allowedMentions: { parse: [] },
+      });
+      return interaction.reply({ content: 'Payment details sent privately in this ticket.', flags: MessageFlags.Ephemeral });
     }
 
     if (interaction.commandName === 'shop' || interaction.commandName === 'buy') {
@@ -946,7 +971,6 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply({ embeds: [brandedEmbed('🤖 Pixel Boosts Bot Help', [
         '**Customer commands**',
         '`/shop` or `/buy` — View packages and open an order',
-        '`/bank` — View the official bank-transfer details',
         '`/stock view` — Check availability',
         '`/package list` — View packages and prices',
         '`/coupon redeem` — Check a coupon code',
@@ -958,6 +982,7 @@ client.on('interactionCreate', async interaction => {
         '',
         '**Store management**',
         '`/store` • `/restock` • `/stock set` • `/package`',
+        '`/payment` — Send bank details inside an order ticket',
         '`/discount` • `/coupon` • `/offer`',
         '`/announce` • `/embed` • `/complete-order`',
         '`/dashboard` • `/stats`',
