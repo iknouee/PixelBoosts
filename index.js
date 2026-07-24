@@ -5,6 +5,7 @@ const path = require('path');
 const express = require('express');
 const {
   ActionRowBuilder,
+  ActivityType,
   ButtonBuilder,
   ButtonStyle,
   ChannelType,
@@ -26,8 +27,9 @@ for (const key of ['DISCORD_TOKEN', 'CLIENT_ID', 'GUILD_ID']) {
 
 const BRAND = {
   name: 'Pixel Boosts',
-  color: 0xff2d9b,
-  banner: 'https://cdn.discordapp.com/attachments/1530275322828951585/1530277037024084178/bannerpixel.png?ex=6a64fd0c&is=6a63ab8c&hm=d9aaef317d28584923626aeeb0e0cd8a0e0b3b7f4b254a64fb0aeead18a981ef',
+  color: 0x008cff,
+  banner: 'https://cdn.discordapp.com/attachments/1530275322828951585/1530284660276465804/ChatGPT_Image_Jul_24_2026_07_44_09_PM.png?ex=6a650426&is=6a63b2a6&hm=44cb3be2506f5ffd929a26fdc2cf4d9ff0a5d2ccd2677d755ddb53fab048fadc',
+  footer: 'Pixel Boosts • Fast, affordable and trusted',
 };
 
 const DATA_FILE = path.join(__dirname, 'data.json');
@@ -43,24 +45,50 @@ const DEFAULT_DATA = {
   offer: 'No active special offer right now. Check back soon!',
   orderCounter: 0,
   stripeUrl: '',
+  storeOpen: true,
+  discountPercent: 0,
   channels: {},
   roles: {},
+  panels: {},
+  coupons: {},
+  stats: {
+    revenue: 0,
+    completedOrders: 0,
+    boostsDelivered: 0,
+    reviews: 0,
+    packageSales: {},
+    sales: [],
+    lastRestockAt: null,
+    lastRestockAmount: 0,
+  },
 };
+
+function cloneDefault() {
+  return JSON.parse(JSON.stringify(DEFAULT_DATA));
+}
 
 function loadData() {
   try {
-    if (!fs.existsSync(DATA_FILE)) return structuredClone(DEFAULT_DATA);
+    if (!fs.existsSync(DATA_FILE)) return cloneDefault();
     const saved = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
     return {
-      ...structuredClone(DEFAULT_DATA),
+      ...cloneDefault(),
       ...saved,
       prices: { ...DEFAULT_DATA.prices, ...(saved.prices || {}) },
       channels: { ...(saved.channels || {}) },
       roles: { ...(saved.roles || {}) },
+      panels: { ...(saved.panels || {}) },
+      coupons: { ...(saved.coupons || {}) },
+      stats: {
+        ...DEFAULT_DATA.stats,
+        ...(saved.stats || {}),
+        packageSales: { ...((saved.stats || {}).packageSales || {}) },
+        sales: Array.isArray((saved.stats || {}).sales) ? saved.stats.sales : [],
+      },
     };
   } catch (error) {
     console.error('Could not load data.json:', error);
-    return structuredClone(DEFAULT_DATA);
+    return cloneDefault();
   }
 }
 
@@ -80,7 +108,7 @@ function brandedEmbed(title, description) {
     .setTitle(title)
     .setDescription(description)
     .setImage(BRAND.banner)
-    .setFooter({ text: 'Pixel Boosts • Fast, affordable and trusted' })
+    .setFooter({ text: BRAND.footer })
     .setTimestamp();
 }
 
@@ -95,11 +123,39 @@ async function adminOnly(interaction) {
   return false;
 }
 
+function parseMoney(value) {
+  const match = String(value).replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : 0;
+}
+
+function money(value) {
+  return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(Number(value) || 0);
+}
+
+function discountedPriceLabel(label) {
+  const percent = Number(data.discountPercent) || 0;
+  if (percent <= 0) return label;
+  const original = parseMoney(label);
+  if (!original) return label;
+  const discounted = original * (1 - percent / 100);
+  return `~~${label}~~ **${money(discounted)}**`;
+}
+
 function priceLines() {
   return Object.entries(data.prices)
     .sort((a, b) => Number(a[0]) - Number(b[0]))
-    .map(([boosts, price]) => `**${boosts} Boosts** — ${price} / month`)
+    .map(([boosts, price]) => `**${boosts} Boosts** — ${discountedPriceLabel(price)} / month`)
     .join('\n');
+}
+
+function storeStatusText() {
+  return data.storeOpen ? '🟢 **OPEN**' : '🔴 **CLOSED**';
+}
+
+function relativeTime(dateString) {
+  if (!dateString) return 'Never';
+  const unix = Math.floor(new Date(dateString).getTime() / 1000);
+  return Number.isFinite(unix) ? `<t:${unix}:R>` : 'Unknown';
 }
 
 const CHANNEL_TYPES = [
@@ -109,12 +165,13 @@ const CHANNEL_TYPES = [
   ['special-offers', 'Special Offers'], ['create-order', 'Create Order'],
   ['order-status', 'Order Status'], ['payment-methods', 'Payment Methods'],
   ['reviews', 'Reviews'], ['proof', 'Proof'], ['video-vouches', 'Video Vouches'],
-  ['completed-orders', 'Completed Orders'], ['logs', 'Logs'], ['sales-log', 'Sales Log'],
-  ['ticket-category', 'Ticket Category'],
+  ['completed-orders', 'Completed Orders'], ['status', 'Store Status'],
+  ['logs', 'Logs'], ['sales-log', 'Sales Log'], ['ticket-category', 'Ticket Category'],
 ];
 
 const ROLE_TYPES = [
-  ['member', 'Member'], ['customer', 'Customer'], ['support', 'Support'], ['staff', 'Staff'],
+  ['member', 'Member'], ['customer', 'Customer'], ['support', 'Support'],
+  ['staff', 'Staff'], ['stock-alerts', 'Stock Alerts'],
 ];
 
 const channelChoices = CHANNEL_TYPES.map(([value, name]) => ({ name, value }));
@@ -122,7 +179,7 @@ const roleChoices = ROLE_TYPES.map(([value, name]) => ({ name, value }));
 
 const commands = [
   new SlashCommandBuilder().setName('setup').setDescription('Send or refresh every configured Pixel Boosts panel').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-  new SlashCommandBuilder().setName('setchannel').setDescription('Choose where a server panel or ticket category is used')
+  new SlashCommandBuilder().setName('setchannel').setDescription('Choose where a panel or ticket category is used')
     .addStringOption(o => o.setName('type').setDescription('What this channel is for').setRequired(true).addChoices(...channelChoices))
     .addChannelOption(o => o.setName('channel').setDescription('Channel or category').setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
@@ -133,20 +190,42 @@ const commands = [
   new SlashCommandBuilder().setName('setstripe').setDescription('Set the Stripe payment-link URL')
     .addStringOption(o => o.setName('url').setDescription('Example: https://buy.stripe.com/...').setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-  new SlashCommandBuilder().setName('config').setDescription('View the current bot channel, role and Stripe setup').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('config').setDescription('View the current channel, role and Stripe setup').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('shop').setDescription('View packages, stock and ordering information'),
   new SlashCommandBuilder().setName('buy').setDescription('Open the order panel and Stripe checkout'),
   new SlashCommandBuilder().setName('stock').setDescription('View or update boost stock')
     .addSubcommand(s => s.setName('view').setDescription('View current stock'))
     .addSubcommand(s => s.setName('set').setDescription('Set current stock').addIntegerOption(o => o.setName('amount').setDescription('Available boosts').setRequired(true).setMinValue(0))),
+  new SlashCommandBuilder().setName('restock').setDescription('Add stock and optionally announce the restock')
+    .addIntegerOption(o => o.setName('amount').setDescription('Boosts to add').setRequired(true).setMinValue(1))
+    .addBooleanOption(o => o.setName('announce').setDescription('Post in announcements and ping Stock Alerts'))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('price').setDescription('View or update package prices')
     .addSubcommand(s => s.setName('view').setDescription('View all prices'))
     .addSubcommand(s => s.setName('set').setDescription('Set a package price')
       .addIntegerOption(o => o.setName('boosts').setDescription('Number of boosts').setRequired(true).setMinValue(1).setMaxValue(100))
       .addStringOption(o => o.setName('price').setDescription('Example: £8.99').setRequired(true).setMaxLength(30))),
+  new SlashCommandBuilder().setName('discount').setDescription('Manage a store-wide percentage discount')
+    .addSubcommand(s => s.setName('view').setDescription('View the active discount'))
+    .addSubcommand(s => s.setName('set').setDescription('Set the discount').addIntegerOption(o => o.setName('percent').setDescription('Percentage off').setRequired(true).setMinValue(1).setMaxValue(90)))
+    .addSubcommand(s => s.setName('clear').setDescription('Remove the active discount')),
+  new SlashCommandBuilder().setName('coupon').setDescription('Create, list, delete or redeem coupon codes')
+    .addSubcommand(s => s.setName('create').setDescription('Create a coupon')
+      .addStringOption(o => o.setName('code').setDescription('Coupon code').setRequired(true).setMaxLength(24))
+      .addIntegerOption(o => o.setName('percent').setDescription('Percentage off').setRequired(true).setMinValue(1).setMaxValue(90))
+      .addIntegerOption(o => o.setName('uses').setDescription('Maximum uses; omit for unlimited').setMinValue(1)))
+    .addSubcommand(s => s.setName('delete').setDescription('Delete a coupon').addStringOption(o => o.setName('code').setDescription('Coupon code').setRequired(true)))
+    .addSubcommand(s => s.setName('list').setDescription('List active coupons'))
+    .addSubcommand(s => s.setName('redeem').setDescription('Check and reserve a coupon for your order').addStringOption(o => o.setName('code').setDescription('Coupon code').setRequired(true))),
+  new SlashCommandBuilder().setName('store').setDescription('Open, close or view the shop')
+    .addSubcommand(s => s.setName('open').setDescription('Open the shop'))
+    .addSubcommand(s => s.setName('close').setDescription('Close the shop'))
+    .addSubcommand(s => s.setName('status').setDescription('View shop status')),
   new SlashCommandBuilder().setName('offer').setDescription('Update the special-offer panel')
     .addStringOption(o => o.setName('text').setDescription('Offer text').setRequired(true).setMaxLength(1000))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('dashboard').setDescription('View the owner dashboard').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('stats').setDescription('View detailed shop analytics').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('announce').setDescription('Send a branded announcement')
     .addChannelOption(o => o.setName('channel').setDescription('Target channel').setRequired(true).addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement))
     .addStringOption(o => o.setName('title').setDescription('Announcement title').setRequired(true).setMaxLength(256))
@@ -164,6 +243,9 @@ const commands = [
     .addStringOption(o => o.setName('amount').setDescription('Amount paid, e.g. £16.99').setRequired(true))
     .addStringOption(o => o.setName('duration').setDescription('Example: 1 month').setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder().setName('review').setDescription('Leave a verified-style customer review')
+    .addIntegerOption(o => o.setName('rating').setDescription('Rating out of 5').setRequired(true).setMinValue(1).setMaxValue(5))
+    .addStringOption(o => o.setName('comment').setDescription('Your review').setRequired(true).setMaxLength(1000)),
   new SlashCommandBuilder().setName('close-ticket').setDescription('Close the current order ticket'),
   new SlashCommandBuilder().setName('help').setDescription('Show Pixel Boosts bot commands'),
 ].map(c => c.toJSON());
@@ -176,15 +258,33 @@ async function registerCommands() {
 
 function orderButtons() {
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('create_order').setLabel('Create an Order').setEmoji('🛒').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId('create_order')
+      .setLabel(data.storeOpen ? 'Create an Order' : 'Store Closed')
+      .setEmoji(data.storeOpen ? '🛒' : '🔒')
+      .setStyle(data.storeOpen ? ButtonStyle.Primary : ButtonStyle.Secondary)
+      .setDisabled(!data.storeOpen),
   );
-  if (data.stripeUrl) {
+  if (data.stripeUrl && data.storeOpen) {
     row.addComponents(new ButtonBuilder().setLabel('Pay with Stripe').setEmoji('💳').setStyle(ButtonStyle.Link).setURL(data.stripeUrl));
   }
   return row;
 }
 
+function statusEmbed() {
+  return brandedEmbed('⚡ Pixel Boosts Status', [
+    `**Store:** ${storeStatusText()}`,
+    `**Available Stock:** ${data.stock} boosts`,
+    `**Payments:** ${data.stripeUrl ? 'Stripe configured' : 'Not configured'}`,
+    `**Active Discount:** ${data.discountPercent ? `${data.discountPercent}% off` : 'None'}`,
+    `**Last Restock:** ${relativeTime(data.stats.lastRestockAt)}`,
+    '',
+    data.storeOpen ? 'Open a private order ticket to get started.' : 'Ordering is temporarily paused. Please check back soon.',
+  ].join('\n'));
+}
+
 function panelDefinitions() {
+  const discountNote = data.discountPercent ? `\n\n🔥 **Current sale: ${data.discountPercent}% off displayed packages.**` : '';
   return [
     ['rules', brandedEmbed('📜 Pixel Boosts Rules', [
       '1. Treat customers and staff with respect.',
@@ -212,17 +312,18 @@ function panelDefinitions() {
       '**5. Delivery**\nYour order is processed and logged once completed.',
     ].join('\n\n'))],
     ['partners', brandedEmbed('📜 Partnerships', 'To discuss a partnership, open a ticket and include your server size, invite link, audience and what you are offering.')],
-    ['boost-packages', brandedEmbed('💎 Boost Packages', `${priceLines()}\n\nAll packages are subject to live stock and staff confirmation. Custom quantities can be quoted in a ticket.`), orderButtons()],
-    ['pricing', brandedEmbed('💰 Current Pricing', `${priceLines()}\n\nYour confirmed ticket quote is final before payment.`), orderButtons()],
-    ['stock', brandedEmbed('⚡ Instant Stock', data.stock > 0 ? `**${data.stock} boosts** are currently available.\n\nOpen a ticket to reserve stock.` : '**Currently out of stock.**\n\nWatch this channel for the next restock.')],
+    ['boost-packages', brandedEmbed('💎 Boost Packages', `${priceLines()}${discountNote}\n\nAll packages are subject to live stock and staff confirmation. Custom quantities can be quoted in a ticket.`), orderButtons()],
+    ['pricing', brandedEmbed('💰 Current Pricing', `${priceLines()}${discountNote}\n\nYour confirmed ticket quote is final before payment.`), orderButtons()],
+    ['stock', brandedEmbed('⚡ Instant Stock', data.stock > 0 ? `**${data.stock} boosts** are currently available.\n\n${data.storeOpen ? 'Open a ticket to reserve stock.' : 'The store is currently closed.'}` : '**Currently out of stock.**\n\nWatch this channel for the next restock.')],
     ['special-offers', brandedEmbed('🎁 Special Offers', data.offer)],
-    ['create-order', brandedEmbed('🎫 Create an Order', 'Press **Create an Order** below to open a private ticket. Staff will confirm your package, stock and final price before you pay.'), orderButtons()],
+    ['create-order', brandedEmbed('🎫 Create an Order', data.storeOpen ? 'Press **Create an Order** below to open a private ticket. Staff will confirm your package, stock and final price before you pay.' : 'The store is currently **closed**. Ordering will reopen soon.'), orderButtons()],
     ['order-status', brandedEmbed('📦 Order Status', 'Order updates are posted inside each private ticket. Completed orders are logged after delivery.')],
-    ['payment-methods', brandedEmbed('💳 Secure Payments', data.stripeUrl ? 'Payments are accepted securely through **Stripe Checkout**.\n\nOnly use the official button below or the link supplied by verified staff in your private ticket.' : 'Stripe is the only supported payment method. The owner has not configured the Stripe payment link yet.'), data.stripeUrl ? orderButtons() : null],
-    ['reviews', brandedEmbed('⭐ Customer Reviews', 'Completed an order? Leave an honest review about your package, delivery and support experience. Never post private payment details.')],
+    ['payment-methods', brandedEmbed('💳 Secure Payments', data.stripeUrl ? 'Payments are accepted securely through **Stripe Checkout**.\n\nOnly use the official button below or the link supplied by verified staff in your private ticket.' : 'Stripe is the only supported payment method. The owner has not configured the Stripe payment link yet.'), data.stripeUrl && data.storeOpen ? orderButtons() : null],
+    ['reviews', brandedEmbed('⭐ Customer Reviews', 'Completed an order? Use `/review` to leave an honest rating about your package, delivery and support experience. Never post private payment details.')],
     ['proof', brandedEmbed('📸 Delivery Proof', 'Privacy-safe delivery confirmations may be posted here. Sensitive details must always be hidden.')],
     ['video-vouches', brandedEmbed('🎥 Video Vouches', 'Customers can share genuine video vouches after a completed order.')],
     ['completed-orders', brandedEmbed('🏆 Completed Orders', 'Verified completed orders are logged here by staff using `/complete-order`.')],
+    ['status', statusEmbed()],
   ];
 }
 
@@ -232,13 +333,25 @@ async function sendOrReplace(key, embed, components = null) {
   const channel = await client.channels.fetch(channelId).catch(() => null);
   if (!channel?.isTextBased()) return { ok: false, reason: `${key} channel is invalid` };
 
-  const recent = await channel.messages.fetch({ limit: 50 }).catch(() => null);
   const marker = `Pixel Boosts • Panel: ${key}`;
-  const old = recent?.find(m => m.author.id === client.user.id && m.embeds?.[0]?.footer?.text === marker);
   const finalEmbed = EmbedBuilder.from(embed).setFooter({ text: marker });
   const payload = { embeds: [finalEmbed], components: components ? [components] : [] };
-  if (old) await old.edit(payload);
-  else await channel.send(payload);
+  let message = null;
+
+  const saved = data.panels[key];
+  if (saved?.messageId && saved.channelId === channel.id) {
+    message = await channel.messages.fetch(saved.messageId).catch(() => null);
+  }
+  if (!message) {
+    const recent = await channel.messages.fetch({ limit: 50 }).catch(() => null);
+    message = recent?.find(m => m.author.id === client.user.id && m.embeds?.[0]?.footer?.text === marker) || null;
+  }
+
+  if (message) await message.edit(payload);
+  else message = await channel.send(payload);
+
+  data.panels[key] = { channelId: channel.id, messageId: message.id };
+  saveData();
   return { ok: true };
 }
 
@@ -247,10 +360,55 @@ async function refreshPanel(key) {
   if (panel) await sendOrReplace(...panel);
 }
 
+async function refreshCommercePanels() {
+  for (const key of ['boost-packages', 'pricing', 'stock', 'create-order', 'payment-methods', 'status']) {
+    await refreshPanel(key);
+  }
+}
+
+function salesSince(msAgo) {
+  const cutoff = Date.now() - msAgo;
+  return data.stats.sales.filter(s => new Date(s.at).getTime() >= cutoff);
+}
+
+function salesRevenue(sales) {
+  return sales.reduce((sum, sale) => sum + (Number(sale.amountNumeric) || 0), 0);
+}
+
+function bestPackage() {
+  const entries = Object.entries(data.stats.packageSales || {});
+  if (!entries.length) return 'No sales yet';
+  entries.sort((a, b) => b[1] - a[1]);
+  return `${entries[0][0]} boosts (${entries[0][1]} orders)`;
+}
+
+async function postLog(key, embed) {
+  const id = data.channels[key];
+  if (!id) return;
+  const channel = await client.channels.fetch(id).catch(() => null);
+  if (channel?.isTextBased()) await channel.send({ embeds: [embed] }).catch(() => {});
+}
+
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
-  client.user.setActivity('Pixel Boosts orders');
   await registerCommands().catch(error => console.error('Command registration failed:', error));
+
+  const activities = [
+    () => ({ name: 'Delivering Boosts', type: ActivityType.Playing }),
+    () => ({ name: '/buy to order', type: ActivityType.Watching }),
+    () => ({ name: `${data.stock} boosts in stock`, type: ActivityType.Watching }),
+    () => ({ name: data.storeOpen ? 'Store Open' : 'Store Closed', type: ActivityType.Playing }),
+    () => ({ name: 'Trusted Service', type: ActivityType.Competing }),
+  ];
+  let activityIndex = 0;
+  const rotate = () => {
+    client.user.setActivity(activities[activityIndex % activities.length]());
+    activityIndex += 1;
+  };
+  rotate();
+  setInterval(rotate, 15_000);
+
+  setInterval(() => refreshPanel('status').catch(() => {}), 60_000);
 });
 
 client.on('guildMemberAdd', async member => {
@@ -264,6 +422,7 @@ client.on('interactionCreate', async interaction => {
   try {
     if (interaction.isButton()) {
       if (interaction.customId === 'create_order') {
+        if (!data.storeOpen) return interaction.reply({ content: 'The store is currently closed. Please check back soon.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
         const existing = interaction.guild.channels.cache.find(c => c.topic?.includes(`Customer: ${interaction.user.id}`));
         if (existing) return interaction.editReply(`You already have an open order: ${existing}`);
@@ -301,12 +460,14 @@ client.on('interactionCreate', async interaction => {
             '• Number of boosts required',
             '• Duration required',
             '• Your server invite',
+            '• Coupon code, if you have one',
             '',
             'Wait for staff to confirm your package and final total before paying.',
             '**Never share your Discord password, token, QR code or cookies.**',
           ].join('\n'))],
           components: [closeRow],
         });
+        await postLog('logs', brandedEmbed('🎫 Order Ticket Opened', `**Order:** #${orderNumber}\n**Customer:** ${interaction.user}\n**Channel:** ${channel}`));
         return interaction.editReply(`Your private order ticket is ready: ${channel}`);
       }
 
@@ -314,6 +475,7 @@ client.on('interactionCreate', async interaction => {
         const canClose = isAdmin(interaction) || interaction.channel?.topic?.includes(`Customer: ${interaction.user.id}`);
         if (!canClose) return interaction.reply({ content: 'Only the customer or an administrator can close this ticket.', ephemeral: true });
         await interaction.reply({ content: 'Closing this ticket in 5 seconds…' });
+        await postLog('logs', brandedEmbed('🔒 Order Ticket Closed', `**Channel:** ${interaction.channel.name}\n**Closed by:** ${interaction.user}`));
         setTimeout(() => interaction.channel.delete('Pixel Boosts ticket closed').catch(() => {}), 5000);
       }
       return;
@@ -332,6 +494,7 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: 'Choose a text or announcement channel for this panel.', ephemeral: true });
       }
       data.channels[type] = channel.id;
+      delete data.panels[type];
       saveData();
       return interaction.reply({ content: `Set **${type}** to ${channel}.`, ephemeral: true });
     }
@@ -353,10 +516,7 @@ client.on('interactionCreate', async interaction => {
       }
       data.stripeUrl = url;
       saveData();
-      await refreshPanel('payment-methods');
-      await refreshPanel('create-order');
-      await refreshPanel('pricing');
-      await refreshPanel('boost-packages');
+      await refreshCommercePanels();
       return interaction.reply({ content: 'Stripe payment link saved and relevant panels refreshed.', ephemeral: true });
     }
 
@@ -364,7 +524,7 @@ client.on('interactionCreate', async interaction => {
       if (!await adminOnly(interaction)) return;
       const channelText = CHANNEL_TYPES.map(([key, name]) => `**${name}:** ${data.channels[key] ? `<#${data.channels[key]}>` : 'Not set'}`).join('\n');
       const roleText = ROLE_TYPES.map(([key, name]) => `**${name}:** ${data.roles[key] ? `<@&${data.roles[key]}>` : 'Not set'}`).join('\n');
-      const embed = brandedEmbed('⚙️ Pixel Boosts Configuration', `${channelText}\n\n**Roles**\n${roleText}\n\n**Stripe:** ${data.stripeUrl ? 'Configured' : 'Not set'}`);
+      const embed = brandedEmbed('⚙️ Pixel Boosts Configuration', `${channelText}\n\n**Roles**\n${roleText}\n\n**Stripe:** ${data.stripeUrl ? 'Configured' : 'Not set'}\n**Store:** ${storeStatusText()}`);
       return interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
@@ -380,7 +540,7 @@ client.on('interactionCreate', async interaction => {
 
     if (interaction.commandName === 'shop' || interaction.commandName === 'buy') {
       return interaction.reply({
-        embeds: [brandedEmbed('🚀 Pixel Boosts Shop', `${priceLines()}\n\n**Stock:** ${data.stock} boosts\n\nOpen a private order before paying so staff can confirm availability.`)],
+        embeds: [brandedEmbed('🚀 Pixel Boosts Shop', `${priceLines()}\n\n**Stock:** ${data.stock} boosts\n**Store:** ${storeStatusText()}\n\n${data.storeOpen ? 'Open a private order before paying so staff can confirm availability.' : 'Ordering is temporarily unavailable.'}`)],
         components: [orderButtons()],
         ephemeral: true,
       });
@@ -388,12 +548,35 @@ client.on('interactionCreate', async interaction => {
 
     if (interaction.commandName === 'stock') {
       const sub = interaction.options.getSubcommand();
-      if (sub === 'view') return interaction.reply({ embeds: [brandedEmbed('⚡ Current Stock', `Available: **${data.stock} boosts**`)], ephemeral: true });
+      if (sub === 'view') return interaction.reply({ embeds: [brandedEmbed('⚡ Current Stock', `Available: **${data.stock} boosts**\nStore: ${storeStatusText()}`)], ephemeral: true });
       if (!await adminOnly(interaction)) return;
       data.stock = interaction.options.getInteger('amount');
       saveData();
-      await refreshPanel('stock');
+      await refreshCommercePanels();
       return interaction.reply({ content: `Stock updated to **${data.stock} boosts**.`, ephemeral: true });
+    }
+
+    if (interaction.commandName === 'restock') {
+      if (!await adminOnly(interaction)) return;
+      const amount = interaction.options.getInteger('amount');
+      const shouldAnnounce = interaction.options.getBoolean('announce') ?? true;
+      data.stock += amount;
+      data.stats.lastRestockAt = new Date().toISOString();
+      data.stats.lastRestockAmount = amount;
+      saveData();
+      await refreshCommercePanels();
+      if (shouldAnnounce && data.channels.announcements) {
+        const channel = await client.channels.fetch(data.channels.announcements).catch(() => null);
+        if (channel?.isTextBased()) {
+          const ping = data.roles['stock-alerts'] ? `<@&${data.roles['stock-alerts']}>` : '';
+          await channel.send({
+            content: ping || undefined,
+            embeds: [brandedEmbed('⚡ Pixel Boosts Restock', `We just added **${amount} boosts**.\n\n**Current stock:** ${data.stock} boosts\n\nOpen an order while stock is available.`)],
+            allowedMentions: { roles: data.roles['stock-alerts'] ? [data.roles['stock-alerts']] : [] },
+          });
+        }
+      }
+      return interaction.reply({ content: `Added **${amount} boosts**. New stock: **${data.stock}**.`, ephemeral: true });
     }
 
     if (interaction.commandName === 'price') {
@@ -404,9 +587,56 @@ client.on('interactionCreate', async interaction => {
       const price = interaction.options.getString('price').trim();
       data.prices[boosts] = price;
       saveData();
-      await refreshPanel('pricing');
-      await refreshPanel('boost-packages');
+      await refreshCommercePanels();
       return interaction.reply({ content: `Updated **${boosts} boosts** to **${price}**.`, ephemeral: true });
+    }
+
+    if (interaction.commandName === 'discount') {
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'view') return interaction.reply({ content: data.discountPercent ? `The active discount is **${data.discountPercent}% off**.` : 'There is no active store-wide discount.', ephemeral: true });
+      if (!await adminOnly(interaction)) return;
+      data.discountPercent = sub === 'clear' ? 0 : interaction.options.getInteger('percent');
+      saveData();
+      await refreshCommercePanels();
+      return interaction.reply({ content: data.discountPercent ? `Store discount set to **${data.discountPercent}% off**.` : 'Store discount cleared.', ephemeral: true });
+    }
+
+    if (interaction.commandName === 'coupon') {
+      const sub = interaction.options.getSubcommand();
+      const code = interaction.options.getString('code')?.trim().toUpperCase();
+      if (sub === 'redeem') {
+        const coupon = data.coupons[code];
+        if (!coupon || coupon.active === false) return interaction.reply({ content: 'That coupon code is invalid or inactive.', ephemeral: true });
+        if (coupon.maxUses && coupon.uses >= coupon.maxUses) return interaction.reply({ content: 'That coupon has reached its usage limit.', ephemeral: true });
+        return interaction.reply({ content: `Coupon **${code}** is valid for **${coupon.percent}% off**. Send this code in your order ticket so staff can apply it.`, ephemeral: true });
+      }
+      if (!await adminOnly(interaction)) return;
+      if (sub === 'create') {
+        const percent = interaction.options.getInteger('percent');
+        const maxUses = interaction.options.getInteger('uses');
+        data.coupons[code] = { percent, maxUses: maxUses || null, uses: 0, active: true, createdAt: new Date().toISOString() };
+        saveData();
+        return interaction.reply({ content: `Created coupon **${code}** for **${percent}% off**${maxUses ? ` with ${maxUses} maximum uses` : ''}.`, ephemeral: true });
+      }
+      if (sub === 'delete') {
+        if (!data.coupons[code]) return interaction.reply({ content: 'Coupon not found.', ephemeral: true });
+        delete data.coupons[code];
+        saveData();
+        return interaction.reply({ content: `Deleted coupon **${code}**.`, ephemeral: true });
+      }
+      const entries = Object.entries(data.coupons);
+      const text = entries.length ? entries.map(([name, c]) => `**${name}** — ${c.percent}% off • ${c.uses}/${c.maxUses || '∞'} uses`).join('\n') : 'No coupons have been created.';
+      return interaction.reply({ embeds: [brandedEmbed('🎟️ Coupon Codes', text)], ephemeral: true });
+    }
+
+    if (interaction.commandName === 'store') {
+      const sub = interaction.options.getSubcommand();
+      if (sub === 'status') return interaction.reply({ embeds: [statusEmbed()], ephemeral: true });
+      if (!await adminOnly(interaction)) return;
+      data.storeOpen = sub === 'open';
+      saveData();
+      await refreshCommercePanels();
+      return interaction.reply({ content: `The store is now **${data.storeOpen ? 'OPEN' : 'CLOSED'}**.`, ephemeral: true });
     }
 
     if (interaction.commandName === 'offer') {
@@ -415,6 +645,37 @@ client.on('interactionCreate', async interaction => {
       saveData();
       await refreshPanel('special-offers');
       return interaction.reply({ content: 'Special offer updated.', ephemeral: true });
+    }
+
+    if (interaction.commandName === 'dashboard') {
+      if (!await adminOnly(interaction)) return;
+      return interaction.reply({ embeds: [brandedEmbed('📊 Pixel Boosts Dashboard', [
+        `**Store:** ${storeStatusText()}`,
+        `**Stock:** ${data.stock} boosts`,
+        `**Orders Completed:** ${data.stats.completedOrders}`,
+        `**Revenue Recorded:** ${money(data.stats.revenue)}`,
+        `**Boosts Delivered:** ${data.stats.boostsDelivered}`,
+        `**Reviews:** ${data.stats.reviews}`,
+        `**Best Package:** ${bestPackage()}`,
+        `**Current Discount:** ${data.discountPercent ? `${data.discountPercent}%` : 'None'}`,
+      ].join('\n'))], ephemeral: true });
+    }
+
+    if (interaction.commandName === 'stats') {
+      if (!await adminOnly(interaction)) return;
+      const today = salesSince(24 * 60 * 60 * 1000);
+      const month = salesSince(30 * 24 * 60 * 60 * 1000);
+      return interaction.reply({ embeds: [brandedEmbed('📈 Pixel Boosts Analytics', [
+        `**Revenue Today:** ${money(salesRevenue(today))}`,
+        `**Revenue Last 30 Days:** ${money(salesRevenue(month))}`,
+        `**Orders Today:** ${today.length}`,
+        `**Orders Last 30 Days:** ${month.length}`,
+        `**All-Time Revenue:** ${money(data.stats.revenue)}`,
+        `**All-Time Orders:** ${data.stats.completedOrders}`,
+        `**Best-Selling Package:** ${bestPackage()}`,
+        `**Stock Remaining:** ${data.stock} boosts`,
+        `**Last Restock:** ${relativeTime(data.stats.lastRestockAt)}`,
+      ].join('\n'))], ephemeral: true });
     }
 
     if (interaction.commandName === 'announce' || interaction.commandName === 'embed') {
@@ -442,15 +703,40 @@ client.on('interactionCreate', async interaction => {
       const role = data.roles.customer ? interaction.guild.roles.cache.get(data.roles.customer) : null;
       if (member && role) await member.roles.add(role).catch(() => {});
       if (data.stock >= boosts) data.stock -= boosts;
+      const amountNumeric = parseMoney(amount);
+      data.stats.revenue += amountNumeric;
+      data.stats.completedOrders += 1;
+      data.stats.boostsDelivered += boosts;
+      data.stats.packageSales[String(boosts)] = (data.stats.packageSales[String(boosts)] || 0) + 1;
+      data.stats.sales.push({ at: new Date().toISOString(), amountNumeric, boosts, customerId: customer.id, orderId });
+      if (data.stats.sales.length > 2000) data.stats.sales = data.stats.sales.slice(-2000);
       saveData();
-      await refreshPanel('stock');
-      return interaction.reply({ content: 'Completed order logged and customer role processed.', ephemeral: true });
+      await refreshCommercePanels();
+      await postLog('sales-log', brandedEmbed('💸 Sale Recorded', `**Order:** #${orderId}\n**Customer:** ${customer}\n**Revenue:** ${amount}\n**Boosts:** ${boosts}`));
+      return interaction.reply({ content: 'Completed order logged, analytics updated and customer role processed.', ephemeral: true });
+    }
+
+    if (interaction.commandName === 'review') {
+      const targetId = data.channels.reviews;
+      const target = targetId ? await client.channels.fetch(targetId).catch(() => null) : null;
+      if (!target?.isTextBased()) return interaction.reply({ content: 'The reviews channel has not been configured yet.', ephemeral: true });
+      const member = interaction.member;
+      if (data.roles.customer && !member.roles.cache.has(data.roles.customer) && !isAdmin(interaction)) {
+        return interaction.reply({ content: 'Only customers with the Customer role can leave a review.', ephemeral: true });
+      }
+      const rating = interaction.options.getInteger('rating');
+      const comment = interaction.options.getString('comment');
+      await target.send({ embeds: [brandedEmbed(`${'⭐'.repeat(rating)} Customer Review`, `**Customer:** ${interaction.user}\n**Rating:** ${rating}/5\n\n${comment}`)] });
+      data.stats.reviews += 1;
+      saveData();
+      return interaction.reply({ content: 'Thank you — your review has been posted.', ephemeral: true });
     }
 
     if (interaction.commandName === 'close-ticket') {
       const canClose = isAdmin(interaction) || interaction.channel?.topic?.includes(`Customer: ${interaction.user.id}`);
       if (!canClose || !interaction.channel?.topic?.startsWith('Pixel Boosts order')) return interaction.reply({ content: 'Use this inside your order ticket.', ephemeral: true });
       await interaction.reply('Closing this ticket in 5 seconds…');
+      await postLog('logs', brandedEmbed('🔒 Order Ticket Closed', `**Channel:** ${interaction.channel.name}\n**Closed by:** ${interaction.user}`));
       setTimeout(() => interaction.channel.delete('Pixel Boosts ticket closed').catch(() => {}), 5000);
     }
 
@@ -458,20 +744,20 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply({ embeds: [brandedEmbed('🤖 Pixel Boosts Bot Help', [
         '**Customer commands**',
         '`/shop` or `/buy` — View packages and open an order',
-        '`/stock view` — Check current availability',
-        '`/price view` — View current prices',
+        '`/stock view` — Check availability',
+        '`/price view` — View prices',
+        '`/coupon redeem` — Check a coupon code',
+        '`/review` — Leave a customer review',
         '`/close-ticket` — Close your order ticket',
         '',
         '**Administrator setup**',
-        '`/setchannel` — Assign every panel channel',
-        '`/setrole` — Assign Member, Customer, Staff and Support roles',
-        '`/setstripe` — Save your Stripe Payment Link',
-        '`/config` — View current configuration',
-        '`/setup` — Send or refresh all configured panels',
+        '`/setchannel` • `/setrole` • `/setstripe` • `/config` • `/setup`',
         '',
         '**Store management**',
-        '`/stock set` • `/price set` • `/offer`',
+        '`/store` • `/restock` • `/stock set` • `/price set`',
+        '`/discount` • `/coupon` • `/offer`',
         '`/announce` • `/embed` • `/complete-order`',
+        '`/dashboard` • `/stats`',
       ].join('\n'))], ephemeral: true });
     }
   } catch (error) {
@@ -484,7 +770,7 @@ client.on('interactionCreate', async interaction => {
 
 const app = express();
 app.get('/', (_, res) => res.status(200).send('Pixel Boosts bot is online.'));
-app.get('/health', (_, res) => res.json({ ok: true, bot: client.user?.tag || 'starting' }));
+app.get('/health', (_, res) => res.json({ ok: true, bot: client.user?.tag || 'starting', storeOpen: data.storeOpen, stock: data.stock }));
 app.listen(Number(process.env.PORT || 10000), '0.0.0.0', () => console.log(`Web server listening on port ${process.env.PORT || 10000}`));
 
 client.login(process.env.DISCORD_TOKEN);
